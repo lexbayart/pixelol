@@ -70,6 +70,12 @@ Single HTML file · Zero dependencies · Zero build step
 
 ---
 
+## 📖 Documentation
+
+- [**Complete User Guide**](docs/GUIDE.md) — tools, hotkeys, layers, export, everything
+
+---
+
 ## 🧪 Dev notes
 
 `docs/` contains the AI audit prompts used during development —
