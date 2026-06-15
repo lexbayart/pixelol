@@ -12,7 +12,7 @@ No install. No account. Works offline.
 
 ## 🔷 What makes this different
 
-In any other editor, if you want a diagonal/isometric pixel look, you rotate the canvas 45°.
+In any other editor, if you want a diagonal pixel look, you rotate the canvas 45°.
 That creates two problems: drawing becomes awkward, and when you export — the image is tilted.
 
 In Pixelol, **the diamond is the native pixel**. The coordinate system is normal.
@@ -27,7 +27,7 @@ There is currently no other editor built specifically around this concept.
 
 ## ✨ Features
 
-🔷 **Diamond pixel grid** — 45° isometric pixels as the native format, not a rotation hack
+🔷 **Diamond pixel grid** — diagonal diamond-shaped pixels as the native format, not a rotation hack
 
 🗂️ **Full layer system** — pixel layers, reference image layers, folder groups, drag-and-drop reordering, per-layer opacity, lock, clipping
 
