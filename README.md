@@ -4,7 +4,7 @@
 
 ## 🚀 Quick Start
 
-**[▶ Open in Browser](https://[YOUR_GITHUB_USERNAME].github.io/pixelol/)**
+**[▶ Open in Browser](https://lexbayart.github.io/pixelol/)**
 
 Or download `index.html` and open it locally — it works completely offline.
 
