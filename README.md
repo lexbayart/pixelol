@@ -85,4 +85,7 @@ Found a bug? Have an idea or suggestion? Write to me on Telegram: [@lexbay](http
 
 ## 📄 License
 
-MIT
+© 2025 lexbayart — [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+
+Free to use and share for non-commercial purposes with credit.
+Commercial use requires explicit permission from the author.
