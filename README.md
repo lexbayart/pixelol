@@ -1,59 +1,67 @@
 # Pixelol 🔷
 
-> **Pixel art has a stagnation problem.** Every editor on the planet uses the same horizontal grid — rows and columns, same angles, same silhouettes. Everything starts to look like everything else.
->
-> Pixelol rotates the pixel 45°. One change. Completely different world.
+> Every pixel art editor on the planet uses the same square grid.
+> Pixelol doesn't. The pixel here is a **diamond** — rotated 45°, built in from scratch, not as a filter or a trick.
 
-Your art drawn in Pixelol is **immediately recognizable** among thousands of pixel art pieces — not because you drew better, but because the shape of your pixel is unlike anything else out there. Diamond-shaped pixels create diagonal contours, softer curves, and a visual depth that the square grid simply can't produce.
+![Pixelol interface](images/interface.png)
 
-**[▶ Open Pixelol in your browser](https://lexbayart.github.io/pixelol/)** — no install, no account, no nonsense.
-
----
-
-## 🔷 Why diamond pixels?
-
-Standard pixel art editors lock you into 90° angles. Diagonals always look like staircases, curves always look chunky, and every artist ends up fighting the same limitations.
-
-Rotate the pixel 45° and everything changes:
-- Diagonals become **natural contours**
-- Silhouettes get **softer and more organic**
-- Your art has a visual signature that **no square-grid editor can replicate**
-
-This is currently the only pixel art editor built around this concept.
+**[▶ Open in browser — draw right now](https://lexbayart.github.io/pixelol/)**
+No install. No account. Works offline.
 
 ---
 
-## ✨ What's inside
+## 🔷 What makes this different
 
-🎨 **Drawing tools** — pen, eraser, fill bucket, eyedropper, line, rectangle
+In any other editor, if you want a diagonal/isometric pixel look, you rotate the canvas 45°.
+That creates two problems: drawing becomes awkward, and when you export — the image is tilted.
 
-🗂️ **Full layer system** — pixel layers, reference image layers, folder groups, drag-and-drop reordering, opacity per layer, lock, clipping
+In Pixelol, **the diamond is the native pixel**. The coordinate system is normal.
+You draw left, right, up, down — exactly like usual.
+But the result looks like nothing else in pixel art.
 
-🖊️ **Stroke engine** — add outlines to any layer with full control over color, width, style (solid / dashed / dotted), corner type, and position (inside / outside / center)
+The contour of any character or object drawn in Pixelol is **immediately recognizable**
+as something different. Not because of a filter. Because the shape of every single pixel is different.
+There is currently no other editor built specifically around this concept.
 
-🎭 **Palette extraction** — drop any photo or image onto the editor and it automatically pulls out the color palette for you to paint with
+---
 
-⏪ **Visual history** — every action is tracked and shown as a visual timeline you can jump to at any point
+## ✨ Features
 
-✏️ **Sketch mode** — hold Alt to draw a non-destructive overlay on any layer without touching the actual pixels
+🔷 **Diamond pixel grid** — 45° isometric pixels as the native format, not a rotation hack
 
-📐 **Reference layer tools** — import images as reference layers with crop, rotate, resize, and opacity
+🗂️ **Full layer system** — pixel layers, reference image layers, folder groups, drag-and-drop reordering, per-layer opacity, lock, clipping
+
+🖊️ **Stroke engine** — add outlines to any layer: color, width, style (solid / dashed / dotted), corner type, inside / outside / center position
+
+🎭 **Palette extraction** — drop any photo into the editor and it pulls out the color palette automatically
+
+⏪ **Visual history** — a visual timeline of every action, click any point to jump back
+
+✏️ **Sketch mode** — Alt + pen draws a non-destructive overlay without touching actual pixels
+
+📐 **Reference layers** — import images as drawing references with crop, rotate, resize, opacity
 
 💾 **Export** — PNG, SVG, or native `.lol` project format
 
-⌨️ **Hotkeys** — full keyboard shortcut support for every tool and action
+🎨 **Drawing tools** — pen, eraser, fill, eyedropper, line, rectangle, select
 
-🔊 **Audio feedback** — subtle sound effects on interactions (can be turned off)
+🔊 **Sound feedback** — subtle audio on interactions
 
 ---
 
-## 🚀 Get started
+## 🖼️ Example
 
-Just open the link. No installation. No account. Works offline after first load.
+This is what Pixelol art looks like — drawn straight, no post-processing, no canvas rotation:
 
-**[▶ Open Pixelol](https://lexbayart.github.io/pixelol/)**
+![Tiger drawn in Pixelol](images/tiger.png)
 
-Or download `index.html` from this repo and open it in any browser — it runs completely standalone.
+---
+
+## 🚀 Open it
+
+**[▶ lexbayart.github.io/pixelol](https://lexbayart.github.io/pixelol/)**
+
+Or download `index.html` and open locally — fully standalone, works without internet.
 
 ---
 
@@ -64,10 +72,10 @@ Single HTML file · Zero dependencies · Zero build step
 
 ---
 
-## 🧪 Development
+## 🧪 Dev notes
 
-The `docs/` folder contains the AI audit prompts used during development —
-structured checklists for finding bugs across every subsystem (layers, history, tools, cross-system interactions).
+`docs/` contains the AI audit prompts used during development —
+structured bug-detection checklists covering every subsystem.
 
 ---
 
