@@ -1,4 +1,4 @@
-# Pixelol 🔷
+# Pixelol 🔷 [Beta]
 
 > Every pixel art editor on the planet uses the same square grid.
 > Pixelol doesn't. The pixel here is a **diamond** — rotated 45°, built in from scratch, not as a filter or a trick.
@@ -51,8 +51,6 @@ There is currently no other editor built specifically around this concept.
 
 ## 🖼️ Example
 
-This is what Pixelol art looks like — drawn straight, no post-processing, no canvas rotation:
-
 ![Tiger drawn in Pixelol](images/tiger.png)
 
 ---
@@ -76,6 +74,12 @@ Single HTML file · Zero dependencies · Zero build step
 
 `docs/` contains the AI audit prompts used during development —
 structured bug-detection checklists covering every subsystem.
+
+---
+
+## 💬 Feedback
+
+Found a bug? Have an idea or suggestion? Write to me on Telegram: [@lexbay](https://t.me/lexbay)
 
 ---
 
