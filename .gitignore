@@ -1,0 +1,9 @@
+# Rust / Tauri build artifacts
+/target/
+
+# Packaged desktop bundles
+*.app
+*.dmg
+
+# macOS
+.DS_Store
