@@ -15465,7 +15465,18 @@ requestAnimationFrame(() => {
 // ║  вызван ДО мутации — здесь ровно один вызов, до первого изменения state.        ║
 // ║  Импорт меняет и слои, и палитру, поэтому opts.isPaletteEntry=true +            ║
 // ║  newPalette, иначе Ctrl+Z вернул бы палитру неправильно.                        ║
-// ╚══════════════════════════════════════════════════════════════════════════════╝
+// ║                                                                                  ║
+// ║  ЖИВОЙ РЕЖИМ (§11, ТЗ §6.1 «живой, через локальный WebSocket»): тот же обмен,     ║
+// ║  но без ручного «Экспорт → чат → Импорт». Соединение держит ЭТА ВКЛАДКА с          ║
+// ║  локальным сервером агента (ws://127.0.0.1 — только этот компьютер). Сервер       ║
+// ║  присылает готовый документ, страница проверяет его тем же _aiValidateJSON и      ║
+// ║  применяет тем же _aiApplyDocument — обхода валидации нет, поэтому Ctrl+Z         ║
+// ║  отменяет живую правку как любой импорт (подпись «Правка агента»). Новых файлов   ║
+// ║  приложения и зависимостей не появилось: только WebSocket из браузера. Если       ║
+// ║  сервера нет — приложение ведёт себя ровно как раньше, кнопка просто показывает   ║
+// ║  «Агент не подключён». Подключение и авто-применение включаются только по        ║
+// ║  нажатию человека в окне «🤖 Агент».                                             ║
+// ╚══════════════════════════════════════════════════════════════════════════════════╝
 
 // ─── 1. КОНСТАНТЫ ФОРМАТА ─────────────────────────────────────────────────────
 const AI_INDEX_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz'; // base-36, всегда нижний регистр
@@ -15890,7 +15901,11 @@ function _aiMergePanelPalette(docPalette, currentPalette, defaultPalette) {
   return out;
 }
 
-function _aiApplyDocument(parsed) {
+// opts.label — подпись записи в истории. Живому режиму (§11) нужен свой текст
+// («Правка агента»), чтобы в истории было видно, чья это была правка; любой
+// другой вызов ничего не передаёт и получает прежнюю подпись.
+function _aiApplyDocument(parsed, opts) {
+  const historyLabel = (opts && typeof opts.label === 'string' && opts.label.trim()) ? opts.label.trim() : 'Импорт от ИИ';
   const docPalette = parsed.palette.slice();
   const prevActive = state.activeLayerIdx;
 
@@ -15934,7 +15949,7 @@ function _aiApplyDocument(parsed) {
   // newPalette here is the panel AFTER the merge (see _aiMergePanelPalette) —
   // exactly what redo must restore; saveHistory snapshots the "before" itself,
   // from the current PALETTE.
-  saveHistory('Импорт от ИИ', '🤖', null, { isPaletteEntry: true, newPalette: mergedPalette.slice() });
+  saveHistory(historyLabel, '🤖', null, { isPaletteEntry: true, newPalette: mergedPalette.slice() });
 
   PALETTE.length = 0;
   mergedPalette.forEach(c => PALETTE.push(c));
@@ -16311,6 +16326,14 @@ function importFromAI() {
   const ta = _aiTextArea(false);
   ta.placeholder = '{"meta":{…},"palette":["#1a1a2e","#e94560"],"layers":[{"name":"тело","folder":null,' +
                    '"bbox":{"minCol":0,"minRow":0,"maxCol":7,"maxRow":1},"rows":["..0000.."]}]}';
+  // Живой режим (§11): если агент прислал правку, пока человек в это окно не
+  // смотрел, она уже ждёт здесь — с текстом в поле. Человеку остаётся нажать
+  // «⬆ Импортировать», как и всегда. Ввод вручную работает как раньше: пустое
+  // поле означает «правки не ждут», поле с текстом — «вот эта».
+  if (_aiLive && _aiLive.proposal) {
+    ta.value = _aiLive.proposal;
+    _aiLive.proposal = null;
+  }
   box.appendChild(ta);
   const status = _aiStatusLine();
   box.appendChild(status);
@@ -16381,6 +16404,485 @@ function _aiInitFileDrop() {
   }, true);
 }
 _aiInitFileDrop();
+
+// ─── 11. ЖИВОЙ РЕЖИМ: ЛОКАЛЬНЫЙ WEBSOCKET (ТЗ §6.1) ─────────────────────────
+// Всё, что ниже, — тонкий клиент поверх обычного `WebSocket`. Ни одной зависимости,
+// ни одной сборки. Если сервера нет и вкладка открыта как обычный файл, приложение
+// ведёт себя ровно как раньше: блок молчит, а «Экспорт/Импорт от ИИ» работает
+// по-старому, вручную.
+//
+// КТО ЧТО ДЕЛАЕТ
+//   • Соединение держит ВКЛАДКА, а не сервер: сервер можно запустить позже,
+//     страница сама переподключится с паузами. И наоборот — вкладку можно
+//     переоткрыть, сервер её заметит.
+//   • Сервер ПРИСЫЛАЕТ готовый документ после каждой правки агента.
+//   • Вкладка ПРОВЕРЯЕТ его тем же _aiValidateJSON и применяет тем же
+//     _aiApplyDocument, что и «Импорт от ИИ». Второго пути импорта не
+//     существует, поэтому Ctrl+Z отменяет живую правку как любой импорт,
+//     а подпись в истории читается «Правка агента».
+//
+// НИЧЕГО САМО ПО СЕБЕ НЕ ПРОИСХОДИТ
+//   • Подключение — только после нажатия кнопки «🤖 Агент».
+//   • «Рисовать сразу» по умолчанию ВЫКЛЮЧЕНО. Пока оно выключено, агент
+//     присылает правку, а вкладка открывает обычное окно импорта с уже
+//     вставленным текстом — нажать «⬆ Импортировать» должен человек.
+//     Молча перерисовывать чужой рисунок нельзя, а включить режим себе —
+//     можно в один клик. Выбор запоминается.
+//   • Правка не применяется посреди штриха: если человек в этот момент рисует
+//     мышью, вкладка ждёт, пока он отпустит кнопку.
+//
+// file://
+//   Браузер может не пустить вкладку, открытую как обычный файл, на WebSocket.
+//   Мы всё равно пробуем подключиться (у многих браузеров это работает), но если
+//   не вышло — говорим об этом прямо и показываем точную команду, которая это
+//   лечит: сервер умеет сам отдать папку проекта по http (см. --serve).
+//
+// ПРОТОКОЛ (v1) — по одному JSON-объекту на текстовое сообщение:
+//   сервер → вкладка: {t:'welcome'|'state'|'notice'|'bye', …}
+//   вкладка → сервер: {t:'hello'|'pull_result'|'apply_result'|'pong', …}
+// Полное описание — в ai-server/README.md, реализация — ai-server/live.js.
+const AI_LIVE_PROTOCOL = 1;
+const AI_LIVE_DEFAULT_URL = 'ws://127.0.0.1:8765';
+const AI_LIVE_STORAGE_KEY = 'pixelol.ai.live.v1';
+const AI_LIVE_MAX_BACKOFF_MS = 15000;   // пауза между попытками переподключиться
+const AI_LIVE_DRAWING_WAIT_MS = 5000;   // сколько ждать, пока человек дорисует штрих
+
+// Настройки живого режима. В localStorage — только если он вообще доступен:
+// в некоторых сборках браузер он бросает исключение, и тогда настройки живут
+// только до перезагрузки. Ни то, ни другое не может сломать приложение.
+const _aiLiveMemory = { url: AI_LIVE_DEFAULT_URL, connected: false, drawNow: false };
+function _aiLiveStore(action, value) {
+  try {
+    const ls = (typeof localStorage !== 'undefined') ? localStorage : null;
+    if (!ls) return null;
+    if (action === 'read') return ls.getItem(AI_LIVE_STORAGE_KEY);
+    if (action === 'write') ls.setItem(AI_LIVE_STORAGE_KEY, value);
+    if (action === 'remove') ls.removeItem(AI_LIVE_STORAGE_KEY);
+  } catch (err) { /* приватный режим, запрещённое хранилище — работаем без него */ }
+  return null;
+}
+function _aiLiveSettings() {
+  const raw = _aiLiveStore('read');
+  let s = null;
+  if (raw) { try { s = JSON.parse(raw); } catch (err) { s = null; } }
+  if (!s || typeof s !== 'object' || Array.isArray(s)) s = {};
+  const url = (typeof s.url === 'string' && s.url.trim()) ? s.url.trim() : AI_LIVE_DEFAULT_URL;
+  // «Рисовать сразу» НЕ включается по умолчанию: только если человек сам так
+  // выбрал раньше. Первый запуск всегда безопасный.
+  const drawNow = s.drawNow === true;
+  return { url: url, drawNow: drawNow };
+}
+function _aiLiveSaveSettings(patch) {
+  const cur = _aiLiveSettings();
+  const next = { url: patch && patch.url ? patch.url : cur.url, drawNow: patch && typeof patch.drawNow === 'boolean' ? patch.drawNow : cur.drawNow };
+  _aiLiveMemory.url = next.url;
+  _aiLiveMemory.drawNow = next.drawNow;
+  _aiLiveStore('write', JSON.stringify(next));
+  return next;
+}
+
+// Всё изменяемое состояние клиента в одном месте.
+const _aiLive = {
+  ws: null,                 // WebSocket | null
+  status: 'off',            // 'off' | 'connecting' | 'connected' | 'waiting'
+  detail: '',               // человеческая строка для диалога и подсказки кнопки
+  want: false,              // человек нажал «Подключить» — до этого сокет не трогаем
+  retryTimer: null,
+  retryDelay: 800,
+  pullWaiters: [],          // клиент ждёт ответа на pull
+  queue: [],                // правки, ждущие конца штриха человека
+  drainTimer: null,
+  proposal: null,           // текст последней неприменённой правки (для «⬆ Импортировать»)
+  dialog: null,
+};
+
+function _aiLiveIsFilePage() {
+  try { return !!(window.location && window.location.protocol === 'file:'); }
+  catch (err) { return false; }
+}
+
+// ─── Кнопка в панели инструментов ────────────────────────────────────────────
+const AI_LIVE_STATUS_TEXT = {
+  off:         '🤖 Агент: нет',
+  connecting:  '🤖 Агент: ищу…',
+  connected:   '🤖 Агент: подключён',
+  waiting:     '🤖 Агент: нет',
+};
+function _aiLiveStatusTitle() {
+  const s = _aiLiveSettings();
+  switch (_aiLive.status) {
+    case 'connecting': return '🤖 Ищу сервер агента: ' + s.url;
+    case 'connected':
+      return s.drawNow
+        ? '🤖 Агент подключён и рисует прямо на холсте. Ctrl+Z отменяет его правки.'
+        : '🤖 Агент подключён. Рисует только после вашего подтверждения. Нажмите, чтобы открыть настройки.';
+    default:
+      return '🤖 Агент не подключён. Нажмите, чтобы подключить сервер агента.';
+  }
+}
+function _aiLivePaintButton() {
+  const b = document.getElementById('aiLiveBtn');
+  if (!b) return;
+  const s = _aiLiveSettings();
+  b.textContent = (s.drawNow && _aiLive.status === 'connected') ? '🤖 Агент: рисует' : (AI_LIVE_STATUS_TEXT[_aiLive.status] || AI_LIVE_STATUS_TEXT.off);
+  b.title = _aiLiveStatusTitle();
+  b.setAttribute('aria-label', b.title);
+  // Цветом помечаем только одно: сейчас агент действительно рисует сам.
+  b.style.color = (s.drawNow && _aiLive.status === 'connected') ? 'var(--accent)' : '';
+}
+function _aiLiveSetStatus(status, detail) {
+  const changed = (_aiLive.status !== status);
+  _aiLive.status = status;
+  _aiLive.detail = detail || '';
+  _aiLivePaintButton();
+  if (_aiLive.dialog && typeof _aiLive.dialog.refresh === 'function') _aiLive.dialog.refresh();
+  return changed;
+}
+_aiInitLiveButton();
+function _aiInitLiveButton() {
+  try {
+    if (document.getElementById('aiLiveBtn')) { _aiLivePaintButton(); return; }
+    const anchor = document.getElementById('importAIBtn');
+    if (!anchor || !anchor.parentNode) return;   // разметку переписали руками — просто молчим
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = anchor.className || 'menu-btn';
+    b.id = 'aiLiveBtn';
+    b.style.color = '';
+    b.addEventListener('click', aiLiveDialog);
+    anchor.parentNode.insertBefore(b, anchor.nextSibling);
+    _aiLivePaintButton();
+  } catch (err) { /* нет панели — живого режима просто не будет */ }
+}
+
+// ─── Разговор с сервером ─────────────────────────────────────────────────────
+function _aiLiveSend(obj) {
+  const ws = _aiLive.ws;
+  if (!ws || ws.readyState !== 1) return false;
+  try { ws.send(JSON.stringify(obj)); return true; }
+  catch (err) { return false; }
+}
+function _aiLiveHello() {
+  _aiLiveSend({
+    t: 'hello', protocol: AI_LIVE_PROTOCOL, role: 'page',
+    app: 'Pixelol', appVersion: ('v' + (typeof PIXELOL_VERSION === 'number' ? PIXELOL_VERSION : 46)),
+  });
+}
+function _aiLiveConnect() {
+  if (_aiLive.ws) return;
+  if (typeof WebSocket !== 'function') {
+    _aiLiveSetStatus('off', 'Этот браузер не умеет живую связь с агентом. Рисунок работает как обычно.');
+    return;
+  }
+  const url = _aiLiveSettings().url;
+  let ws;
+  try { ws = new WebSocket(url); }
+  catch (err) {
+    _aiLiveSetStatus('off', 'Не получилось подключиться: ' + ((err && err.message) ? err.message : err));
+    return;
+  }
+  _aiLive.ws = ws;
+  _aiLiveSetStatus('connecting', 'Подключаюсь к ' + url + '…');
+
+  ws.onopen = () => {
+    _aiLive.retryDelay = 800;
+    _aiLiveSetStatus('connected', 'Связь с агентом есть.');
+    _aiLiveHello();
+    _aiToast('🤖 Агент подключён', false);
+  };
+  ws.onmessage = ev => {
+    let msg;
+    try { msg = JSON.parse(String((ev && ev.data) != null ? ev.data : '')); }
+    catch (err) { return; }   // мусор от сервера — просто игнорируем, холст не трогаем
+    if (!msg || typeof msg !== 'object') return;
+    _aiLiveOnMessage(msg);
+  };
+  ws.onerror = () => { /* подробности придут в onclose — там и разбираемся */ };
+  ws.onclose = ev => {
+    _aiLive.ws = null;
+    const wasConnected = (_aiLive.retryDelay === 800 && _aiLive.status === 'connected');
+    _aiLiveSetStatus('waiting', 'Связь оборвалась' + ((ev && ev.reason) ? ': ' + ev.reason : '.'));
+    if (wasConnected) _aiToast('🤖 Агент отключился. Рисунок не менялся.', true);
+    if (_aiLive.want) _aiLiveScheduleRetry(url);
+  };
+}
+function _aiLiveScheduleRetry(url) {
+  if (_aiLive.retryTimer || !_aiLive.want) return;
+  const delay = _aiLive.retryDelay;
+  _aiLive.retryDelay = Math.min(delay * 2, AI_LIVE_MAX_BACKOFF_MS);
+  _aiLiveSetStatus('waiting', 'Сервера нет — пробую снова через ' + Math.round(delay / 1000) + ' с.');
+  _aiLive.retryTimer = setTimeout(() => {
+    _aiLive.retryTimer = null;
+    if (!_aiLive.want) return;
+    _aiLiveConnect();
+  }, delay);
+}
+function aiLiveDisconnect() {
+  _aiLive.want = false;
+  if (_aiLive.retryTimer) { clearTimeout(_aiLive.retryTimer); _aiLive.retryTimer = null; }
+  const ws = _aiLive.ws;
+  _aiLive.ws = null;
+  if (ws) { try { ws.onclose = null; ws.close(); } catch (err) { /* уже закрыт */ } }
+  _aiLiveSetStatus('off', 'Агент отключён. Рисунок больше не меняется сам.');
+  _aiToast('🤖 Агент отключён', false);
+}
+
+// ─── Обработка сообщений сервера ─────────────────────────────────────────────
+function _aiLiveOnMessage(msg) {
+  switch (msg.t) {
+    case 'welcome':
+      _aiLiveSetStatus('connected', 'Агент подключён' + (msg.file ? '. Файл: ' + msg.file : '.'));
+      _aiLivePaintButton();
+      return;
+    case 'pull':
+      _aiLiveAnswerPull(msg.id);
+      return;
+    case 'state':
+      _aiLiveQueueState(msg);
+      return;
+    case 'notice':
+      if (typeof msg.message === 'string' && msg.message) _aiToast(msg.message, msg.level === 'warn' || msg.level === 'error');
+      return;
+    case 'bye':
+      _aiLiveSetStatus('waiting', (typeof msg.message === 'string' && msg.message) ? msg.message : 'Сервер агента выключается.');
+      return;
+    default:
+      return;   // неизвестное сообщение — будущее расширение протокола, а не ошибка
+  }
+}
+// Сервер спрашивает, что человек видит прямо сейчас. Отвечаем тем же экспортом,
+// который делает кнопка «⬇ Экспорт для ИИ»: никакого второго формата.
+function _aiLiveAnswerPull(id) {
+  let text = null;
+  let error = null;
+  try { text = _aiBuildExportJSON(); }
+  catch (err) { error = 'не удалось собрать документ: ' + ((err && err.message) ? err.message : err); }
+  _aiLiveSend({ t: 'pull_result', protocol: AI_LIVE_PROTOCOL, id: id, text: text, error: error });
+}
+// Правка ждёт конца штриха: пересобирать слои под рукой, которая сейчас рисует —
+// верный способ получить испорченный холст.
+function _aiLiveQueueState(msg) {
+  _aiLive.queue.push({ msg: msg, queuedAt: Date.now() });
+  _aiLiveScheduleDrain();
+}
+function _aiLiveHumanBusy() {
+  try { return !!(typeof state !== 'undefined' && state && state.isDrawing); }
+  catch (err) { return false; }
+}
+function _aiLiveScheduleDrain() {
+  if (_aiLive.drainTimer) return;
+  _aiLive.drainTimer = setInterval(() => {
+    if (_aiLive.queue.length === 0) {
+      clearInterval(_aiLive.drainTimer);
+      _aiLive.drainTimer = null;
+      return;
+    }
+    const head = _aiLive.queue[0];
+    if (_aiLiveHumanBusy()) {
+      if (Date.now() - head.queuedAt > AI_LIVE_DRAWING_WAIT_MS) {
+        _aiLive.queue.shift();
+        _aiLiveAnswer(head.msg, false, false, 'человек рисовал мышью дольше 5 секунд — правка не применена');
+        _aiToast('✗ Правка агента не применена: вы рисовали мышью. Повторите после того, как закончите.', true);
+      }
+      return;   // ещё рисует — пробуем через 120 мс
+    }
+    _aiLive.queue.shift();
+    _aiLiveApplyState(head.msg);
+  }, 120);
+}
+function _aiLiveAnswer(msg, ok, applied, message, stats) {
+  _aiLiveSend({
+    t: 'apply_result', protocol: AI_LIVE_PROTOCOL,
+    seq: (msg && typeof msg.seq === 'number') ? msg.seq : null,
+    ok: !!ok, applied: !!applied, message: message || '', stats: stats || null,
+  });
+}
+
+// Единственное место, где правка агента попадает на холст. Ровно тот же путь,
+// что и у кнопки «⬆ Импорт от ИИ»: _aiValidateJSON → подтверждение →
+// _aiApplyDocument. Обхода валидации здесь нет и быть не может.
+function _aiLiveApplyState(msg) {
+  const text = (typeof msg.document === 'string') ? msg.document
+    : (msg.document && typeof msg.document === 'object' ? JSON.stringify(msg.document) : null);
+  if (text === null) {
+    _aiLiveAnswer(msg, false, false, 'сервер прислал документ не в том виде, какого я жду');
+    return;
+  }
+  let parsed;
+  try { parsed = _aiValidateJSON(text); }
+  catch (err) {
+    const m = 'проверка документа упала: ' + ((err && err.message) ? err.message : err);
+    _aiLiveAnswer(msg, false, false, m);
+    _aiToast('✗ Правка агента не применена: ' + m, true);
+    return;
+  }
+  if (!parsed.ok) {
+    _aiLiveAnswer(msg, false, false, parsed.error);
+    _aiToast('✗ Агент прислал негодный рисунок: ' + parsed.error, true);
+    return;
+  }
+
+  if (!_aiLiveSettings().drawNow) {
+    // Не включён режим «рисовать сразу»: показываем правку и ждём человека.
+    _aiLiveAnswer(msg, true, false, 'ждёт подтверждения в окне импорта');
+    _aiLiveOfferProposal(text, parsed);
+    return;
+  }
+  try {
+    const result = _aiApplyDocument(parsed, { label: 'Правка агента' });
+    _aiLiveAnswer(msg, true, true, 'применено', result);
+    _aiToast('🤖 Агент нарисовал: ' + result.layers + ' ' + _aiPlural(result.layers, 'слой', 'слоя', 'слоёв') +
+      ', ' + result.pixels + ' ' + _aiPlural(result.pixels, 'пиксель', 'пикселя', 'пикселей') +
+      ' · Ctrl+Z — отменить', false);
+  } catch (err) {
+    const m = 'не применено: ' + ((err && err.message) ? err.message : err);
+    _aiLiveAnswer(msg, false, false, m);
+    _aiToast('✗ Правка агента не применена: ' + m, true);
+  }
+}
+
+// Правка, которую человек ещё не подтвердил. Показываем её ТЕМ ЖЕ окном импорта:
+// та же проверка, тот же вопрос, та же кнопка — учиться ничему новому не надо.
+function _aiLiveOfferProposal(text, parsed) {
+  _aiLive.proposal = text;
+  if (document.getElementById('aiDialog')) {
+    // Окно импорта уже открыто (там может быть ваш собственный текст) —
+    // не закрываем его, правка подождёт в стороне и подставится в следующий раз.
+    _aiToast('🤖 Агент прислал правку — она подставится в «⬆ Импорт от ИИ».', false);
+    return;
+  }
+  const pixels = parsed.layers.reduce((n, ld) => n + ld.pixels.size, 0);
+  importFromAI();
+  if (_aiImportUI && typeof _aiImportUI.status === 'function') {
+    _aiImportUI.status('Это правка от агента: ' + parsed.layers.length + ' ' +
+      _aiPlural(parsed.layers.length, 'слой', 'слоя', 'слоёв') + ', ' + pixels + ' ' +
+      _aiPlural(pixels, 'пиксель', 'пикселя', 'пикселей') + '. Нажмите «⬆ Импортировать», чтобы принять её, ' +
+      'или «Отмена».', false);
+  }
+}
+
+// ─── Диалог «🤖 Агент» ───────────────────────────────────────────────────────
+// Здесь человек и включает режим, и выключает его. Ничего не включается само.
+function aiLiveDialog() {
+  const { box, close } = _aiModal('🤖 Агент',
+    'Агент — это программа, которая рисует на этом же холсте. Она работает на вашем компьютере, ' +
+    'в вашей же папке, и подключается только к вашему же браузеру.', () => {
+    _aiLive.dialog = null;
+  });
+
+  const status = document.createElement('div');
+  status.style.cssText = 'font-size:14px;line-height:1.6;margin:4px 0 14px;color:#e8e8f0;';
+  const explain = document.createElement('div');
+  explain.style.cssText = 'font-size:12px;line-height:1.7;color:#888899;margin-bottom:16px;white-space:pre-wrap;';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:10px;margin-top:16px;align-items:center;';
+
+  const toggle = document.createElement('input');
+  toggle.type = 'checkbox';
+  toggle.id = 'aiLiveDrawNow';
+  const toggleLabel = document.createElement('label');
+  toggleLabel.htmlFor = 'aiLiveDrawNow';
+  toggleLabel.style.cssText = 'font-size:13px;line-height:1.5;color:#e8e8f0;cursor:pointer;';
+  toggleLabel.textContent = 'Рисовать сразу, без подтверждения';
+  const toggleRow = document.createElement('div');
+  toggleRow.style.cssText = 'display:flex;gap:9px;align-items:flex-start;margin-bottom:6px;';
+  toggleRow.appendChild(toggle);
+  toggleRow.appendChild(toggleLabel);
+
+  const connectBtn = _aiButton('🔌 Подключить агента', true, () => {
+    if (_aiLive.want && _aiLive.status === 'connected') { aiLiveDisconnect(); return; }
+    _aiLive.want = true;
+    _aiLive.retryDelay = 800;
+    _aiLiveConnect();
+    _aiLiveOfferDialogRefresh();
+  });
+  const urlRow = document.createElement('div');
+  urlRow.style.cssText = 'margin-top:16px;';
+  const urlLabel = document.createElement('div');
+  urlLabel.style.cssText = 'font-size:11px;color:#888899;margin-bottom:5px;';
+  urlLabel.textContent = 'Адрес сервера агента:';
+  const urlInput = document.createElement('input');
+  urlInput.type = 'text';
+  urlInput.spellcheck = false;
+  urlInput.style.cssText = 'width:100%;background:#0e0e12;border:1px solid #2e2e42;border-radius:7px;color:#e8e8f0;' +
+    'padding:9px 10px;font-family:JetBrains Mono,monospace;font-size:12px;';
+  urlRow.appendChild(urlLabel);
+  urlRow.appendChild(urlInput);
+
+  function refresh() {
+    const s = _aiLiveSettings();
+    toggle.checked = s.drawNow;
+    connectBtn.textContent = (_aiLive.want && _aiLive.status !== 'off') ? '⏹ Отключить агента' : '🔌 Подключить агента';
+    const detail = _aiLive.detail ? '\n' + _aiLive.detail : '';
+    status.textContent = _aiLiveStatusText(_aiLive.status) + detail;
+    status.style.color = (_aiLive.status === 'connected') ? '#6af7c4' : '#e8e8f0';
+    explain.textContent = s.drawNow
+      ? 'Агент будет рисовать на холсте сразу, как только позовёт сервер.\nCtrl+Z отменяет его правку, как любую другую.'
+      : 'Агент пришлёт правку, и она появится в окне «Импорт от ИИ» с готовым текстом.\nНажмите «⬆ Импортировать», чтобы принять её — ничего не случится само.';
+    if (document.activeElement !== urlInput) urlInput.value = s.url;
+  }
+  _aiLive.dialog = { refresh: refresh };
+  refresh();
+
+  toggle.addEventListener('change', () => {
+    _aiLiveSaveSettings({ drawNow: toggle.checked });
+    refresh();
+    _aiLivePaintButton();
+    _aiToast(toggle.checked ? '🤖 Агент будет рисовать сам, без подтверждения.' : '🤖 Агент будет только предлагать правки.', false);
+  });
+  urlInput.addEventListener('change', () => {
+    const v = urlInput.value.trim();
+    if (!v) { refresh(); return; }
+    _aiLiveSaveSettings({ url: v });
+    if (_aiLive.want) { aiLiveDisconnect(); _aiLive.want = true; _aiLiveConnect(); }
+    refresh();
+  });
+
+  box.appendChild(status);
+  box.appendChild(explain);
+  box.appendChild(toggleRow);
+  box.appendChild(urlRow);
+  box.appendChild(row);
+  row.appendChild(connectBtn);
+  row.appendChild(_aiButton('Закрыть', false, () => close()));
+
+  // Подсказка про file:// — только когда она правда нужна: страница открыта как
+  // обычный файл ИЛИ подключиться не вышло. Зря пугать не будем.
+  const hint = document.createElement('div');
+  hint.style.cssText = 'font-size:12px;line-height:1.7;color:#f0c674;margin-top:16px;border-top:1px solid #2e2e42;' +
+    'padding-top:14px;white-space:pre-wrap;display:none;';
+  box.appendChild(hint);
+  function refreshHint() {
+    const needs = _aiLiveIsFilePage() || _aiLive.status === 'waiting' || _aiLive.status === 'off';
+    if (!needs) { hint.style.display = 'none'; return; }
+    hint.style.display = 'block';
+    hint.textContent = _aiLiveIsFilePage()
+      ? '⚠ Эта вкладка открыта как обычный файл (file://). Некоторые браузеры не пускают такую вкладку в сеть — ' +
+        'тогда связи не будет.\nЧтобы всё заработало, откройте приложение по адресу http:\n' +
+        '    node ai-server/server.js --live --serve\n' +
+        'и откройте http://127.0.0.1:8765/index.html в том же браузере.'
+      : 'Не получается связаться с сервером. Проверьте, что он запущен: команда выше, и адрес ' +
+        _aiLiveSettings().url + ' совпадает с тем, что вы напечатали выше.';
+  }
+  const baseRefresh = _aiLive.dialog.refresh;
+  _aiLive.dialog.refresh = () => { baseRefresh(); refreshHint(); };
+  refreshHint();
+
+  box.focus();
+}
+function _aiLiveOfferDialogRefresh() {
+  if (_aiLive.dialog && typeof _aiLive.dialog.refresh === 'function') _aiLive.dialog.refresh();
+}
+function _aiLiveStatusText(status) {
+  switch (status) {
+    case 'connected':  return '✅ Агент подключён.';
+    case 'connecting': return '⏳ Подключаюсь к серверу агента…';
+    case 'waiting':    return '⏳ Агент не подключён. Жду, когда сервер запустят.';
+    default:           return '⏸ Агент не подключён. Рисунок работает как обычно.';
+  }
+}
+// Автозапуск запрещён намеренно: сокет создаётся только по нажатию кнопки.
+// _aiInitLiveButton() выше уже поставил кнопку и её подпись.
 
 // Подписи кнопок продублированы в разметке — на случай ручной правки index.html.
 (function _aiButtonTitles() {

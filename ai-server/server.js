@@ -14,6 +14,18 @@
  *   transport requires: one JSON object per line, no embedded newlines, nothing
  *   on stdout except protocol messages (all logging goes to stderr).
  *
+ * TWO TRANSPORTS, ONE SET OF TOOLS (--live)
+ *   File mode (default): the tools read and write the AI-JSON file below, and
+ *   the human brings it home by hand.
+ *   Live mode (--live): the same three tools additionally talk to an OPEN
+ *   Pixelol tab over a local WebSocket (see live.js, protocol v1). What the
+ *   agent sees is what the human sees, and every write is pushed to the tab as
+ *   it is made, so the strokes appear on the canvas while they are drawn.
+ *   In live mode the page is the authority: the server reads the current
+ *   document from the tab before each call and asks the tab whether it applied
+ *   the result. A tab that rejects the document makes the server roll its file
+ *   back byte-for-byte, so file and canvas can never drift apart silently.
+ *
  * STATE FILE
  *   One plain JSON file on disk — the very same document the «Экспорт для ИИ»
  *   button in index.html downloads. The user presses that button once per
@@ -47,9 +59,10 @@
 
 const fs = require('fs');
 const path = require('path');
+const { startLiveServer } = require('./live.js');
 
 const SERVER_NAME = 'pixelol-ai';
-const SERVER_VERSION = '1.0.0';
+const SERVER_VERSION = '1.1.0';   // 1.1.0 adds the live WebSocket transport (--live)
 
 // MCP protocol revisions this server speaks. On initialize we echo the client's
 // revision when we know it, otherwise we answer with our own latest.
@@ -309,6 +322,24 @@ function writeCanvasFile(file, doc) {
   }
 }
 
+// Raw bytes of the file, or null when it does not exist. Used only to restore
+// the exact previous content if the attached page rejects what we wrote.
+function readFileRaw(file) {
+  try { return fs.readFileSync(file, 'utf8'); }
+  catch (err) { if (err.code === 'ENOENT') return null; throw new ToolError('Cannot read ' + file + ': ' + err.message); }
+}
+
+function writeFileRaw(file, text) {
+  const tmp = file + '.tmp';
+  try {
+    fs.writeFileSync(tmp, text, 'utf8');
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch (e) { /* best effort */ }
+    throw new ToolError('Cannot restore ' + file + ': ' + err.message);
+  }
+}
+
 function countPixels(layers) {
   let n = 0;
   for (const l of layers) {
@@ -323,13 +354,17 @@ function layerSummary(layers) {
 }
 
 // ─── Tools ───────────────────────────────────────────────────────────────────
-function toolGetCanvasState() {
-  const v = readCanvasFile(STATE_FILE);
+async function toolGetCanvasState() {
+  const v = await loadCanvasState();
   if (v.notes.length) log('notes: ' + v.notes.join(' | '));
-  return textResult(JSON.stringify(v.doc, null, 2));
+  let out = JSON.stringify(v.doc, null, 2);
+  if (v.source === 'page') {
+    out += '\n\n// read live from the attached Pixelol tab — this is exactly what the human sees right now.';
+  }
+  return textResult(out);
 }
 
-function toolDrawRun(args) {
+async function toolDrawRun(args) {
   const hasDocument = args.document !== undefined;
   const hasEdits = args.edits !== undefined;
   if (hasDocument === hasEdits) {
@@ -344,15 +379,23 @@ function toolDrawRun(args) {
     const docText = typeof args.document === 'string' ? args.document : JSON.stringify(args.document);
     const v = validateDocumentText(docText);
     if (!v.ok) throw new ToolError('Document rejected, file left untouched: ' + v.error);
+    const beforeText = readFileRaw(STATE_FILE);
     writeCanvasFile(STATE_FILE, v.doc);
+    const live = await pushToTab(v.doc, 'draw_run');
+    if (live.status === 'rejected') {
+      rollbackFile(beforeText, 'draw_run');
+      throw new ToolError('The open Pixelol tab rejected this document, so nothing was changed anywhere: ' +
+        live.message + '\nThe file was restored to its previous content. Ask the human what the tab says, or ' +
+        'reconnect it (reload the page) and retry with a smaller, correct document.');
+    }
     return textResult('✓ draw_run: full document written.' + notesBlock(v.notes) +
-      summaryBlock(v.doc, 'whole canvas'));
+      summaryBlock(v.doc, 'whole canvas') + liveStatusLine(live, 'draw_run'));
   }
 
   if (!Array.isArray(args.edits) || args.edits.length === 0) {
     throw new ToolError('"edits" must be a non-empty array of patch objects.');
   }
-  const current = readCanvasFile(STATE_FILE);
+  const current = await loadCanvasState();
   const doc = current.doc;
   const notes = current.notes.slice();
   applyPaletteExtension(doc, args.palette);
@@ -388,17 +431,24 @@ function toolDrawRun(args) {
   // Final guard: what we are about to write must still be a valid document.
   const finalCheck = validateDocumentText(JSON.stringify(doc));
   if (!finalCheck.ok) throw new ToolError('Internal check failed, file left untouched: ' + finalCheck.error);
+  const beforeText = readFileRaw(STATE_FILE);
   writeCanvasFile(STATE_FILE, finalCheck.doc);
+  const live = await pushToTab(finalCheck.doc, 'draw_run');
+  if (live.status === 'rejected') {
+    rollbackFile(beforeText, 'draw_run');
+    throw new ToolError('The open Pixelol tab rejected the result of these edits, so nothing was changed anywhere: ' +
+      live.message + '\nThe file was restored to its previous content. Reconnect the tab (reload the page) and retry.');
+  }
 
   const lines = changed.map(c => '  · [' + c.index + '] ' + c.name + ' — ' + c.op +
     (c.painted === undefined ? '' : ', ' + c.painted + ' cells painted') + '\n' + indentRows(finalCheck.doc.layers[c.index].rows, 4));
   return textResult('✓ draw_run: ' + args.edits.length + ' edit(s) applied.\n' + lines.join('\n') +
     summaryBlock(finalCheck.doc, 'pixels ' + before + ' → ' + countPixels(finalCheck.doc.layers)) +
-    notesBlock(notes));
+    notesBlock(notes) + liveStatusLine(live, 'draw_run'));
 }
 
-function toolAddLayer(args) {
-  const current = readCanvasFile(STATE_FILE);
+async function toolAddLayer(args) {
+  const current = await loadCanvasState();
   const doc = current.doc;
   const notes = current.notes.slice();
   applyPaletteExtension(doc, args.palette);
@@ -426,11 +476,18 @@ function toolAddLayer(args) {
   doc.layers.splice(pos, 0, encodeLayer(name, folder, cells));
   const finalCheck = validateDocumentText(JSON.stringify(doc));
   if (!finalCheck.ok) throw new ToolError('Internal check failed, file left untouched: ' + finalCheck.error);
+  const beforeText = readFileRaw(STATE_FILE);
   writeCanvasFile(STATE_FILE, finalCheck.doc);
+  const live = await pushToTab(finalCheck.doc, 'add_layer');
+  if (live.status === 'rejected') {
+    rollbackFile(beforeText, 'add_layer');
+    throw new ToolError('The open Pixelol tab rejected the new layer, so nothing was changed anywhere: ' +
+      live.message + '\nThe file was restored to its previous content. Reconnect the tab and retry.');
+  }
 
   return textResult('✓ add_layer: created "' + name + '"' + (folder ? ' in folder "' + folder + '"' : ' (no folder)') +
     ' at index ' + pos + ' (0 = topmost).\n' + indentRows(finalCheck.doc.layers[pos].rows, 2) +
-    summaryBlock(finalCheck.doc, 'new layer') + notesBlock(notes));
+    summaryBlock(finalCheck.doc, 'new layer') + notesBlock(notes) + liveStatusLine(live, 'add_layer'));
 }
 
 // Optional palette extension: append-only. Existing indices must keep their
@@ -497,6 +554,79 @@ function summaryBlock(doc, extra) {
 function notesBlock(notes) {
   if (!notes || notes.length === 0) return '';
   return '\nNotes:\n' + notes.map(n => '  ! ' + n).join('\n');
+}
+
+// ─── Live bridge: where the document comes from, and where it goes ───────────
+// File mode (the default, and always when no tab is attached): the file, exactly
+// as before. Live mode: the open tab, because the human has been drawing with
+// the mouse and the file cannot know about that. If the tab does not answer in
+// time we fall back to the file rather than guessing.
+async function loadCanvasState() {
+  if (LIVE && LIVE.hub.attached()) {
+    const text = await LIVE.hub.pull();
+    if (text !== null && String(text).trim() !== '') {
+      const v = validateDocumentText(String(text));
+      if (!v.ok) {
+        throw new ToolError('The attached Pixelol tab returned something that is not a valid AI-JSON document ' +
+          '(' + v.error + '). Nothing was changed. Reconnect the tab (reload the page) and try again.');
+      }
+      v.source = 'page';
+      return v;
+    }
+    log('live: the attached tab did not answer, using the file instead');
+  }
+  const v = readCanvasFile(STATE_FILE);
+  v.source = 'file';
+  return v;
+}
+
+// Hand a finished document to the open tab and wait for its verdict.
+// Returns {status, message} — see live.js. Never throws: a live problem must
+// not take the file-mode tool with it, except that a REJECTION is reported to
+// the caller so it can restore the file.
+async function pushToTab(doc, origin) {
+  if (!LIVE) return { status: 'no-live', message: '' };
+  try {
+    return await LIVE.hub.push(doc, origin);
+  } catch (err) {
+    log('live push failed: ' + (err && err.message ? err.message : err));
+    return { status: 'error', message: 'live push failed: ' + (err && err.message ? err.message : err) };
+  }
+}
+
+function liveStatusLine(result, toolName) {
+  switch (result.status) {
+    case 'applied':
+      return '\nLive: the open tab applied it — the human is watching it appear on the canvas.';
+    case 'proposed':
+      return '\nLive: the tab validated the document but is NOT applying changes automatically. The human has to ' +
+        'confirm it there. Tell them to look at the Pixelol window.';
+    case 'no-page':
+      return '\nLive: no Pixelol tab is attached, so only the file changed. The human presses «Импорт от ИИ» to see it.';
+    case 'no-live':
+      return '\nLive: this server runs in file mode (it was started without --live), so only the file changed — the ' +
+        'human presses «Импорт от ИИ» to see it. Start it with --live to drive an open tab instead.';
+    case 'rejected':
+      return '\nLive: THE TAB REFUSED the document — ' + (result.message || 'no reason given');
+    case 'timeout':
+      return '\nLive: the tab did not answer in time — the file changed, but the canvas may not have. Ask the human ' +
+        'to check the window, or reload it.';
+    case 'detached':
+      return '\nLive: the tab closed while the change was in flight — the file changed, the canvas may not have.';
+    default:
+      return '\nLive: ' + (result.message || result.status);
+  }
+}
+
+// Restore the file byte-for-byte after the attached tab refused the document.
+function rollbackFile(beforeText, toolName) {
+  if (beforeText === null) {
+    // The file did not exist before this call and we created it; removing it
+    // restores the previous state exactly. Nothing of the user's is lost.
+    try { fs.unlinkSync(STATE_FILE); } catch (e) { /* already gone */ }
+    return;
+  }
+  writeFileRaw(STATE_FILE, beforeText);
 }
 
 function textResult(text) {
@@ -631,16 +761,35 @@ const TOOLS = [
   },
 ];
 
+// tools/list answers with the static declarations plus one honest line about the
+// transport the server is actually in right now. The declarations themselves
+// never change, so a client can cache the schemas.
+function toolList() {
+  const liveNote = LIVE
+    ? '\n\nLIVE MODE IS ON (ws://127.0.0.1:' + LIVE.port + '): get_canvas_state reads the attached Pixelol tab, and ' +
+      'draw_run / add_layer are pushed to that tab and reported as applied / proposed / rejected. A rejected ' +
+      'document is not written anywhere.'
+    : '\n\nThis server runs in FILE mode: it edits ' + STATE_FILE + ' and waits for the human to press ' +
+      '«Импорт от ИИ». Start it with --live to drive an open Pixelol tab instead.';
+  return TOOLS.map(t => Object.assign({}, t, { description: t.description + liveNote }));
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 function usage() {
   return [
-    'pixelol-ai ' + SERVER_VERSION + ' — MCP server for Pixelol (Level 1, file mode)',
+    'pixelol-ai ' + SERVER_VERSION + ' — MCP server for Pixelol (Level 1: file mode, or live mode)',
     '',
-    'Usage: node server.js [--file <path/to/canvas.ai.json>]',
+    'Usage: node server.js [--file <path/to/canvas.ai.json>] [--live [--port <n>] [--serve [dir]]]',
     '',
     'Options:',
     '  --file <path>   AI-JSON file to read and write. Default: ./canvas.ai.json next to this script.',
     '                  Also settable with the PIXELOL_AI_FILE environment variable.',
+    '  --live          Also listen for an open Pixelol tab on a local WebSocket (ws://127.0.0.1:8765),',
+    '                  so the same tools drive the canvas live and the human watches every stroke.',
+    '  --port <n>      WebSocket / HTTP port for --live. Default: 8765. 127.0.0.1 only, never 0.0.0.0.',
+    '  --serve [dir]   With --live: also serve that folder over http://127.0.0.1:<port>/ so the page can',
+    '                  be opened over http (a file:// tab may be blocked from opening a WebSocket).',
+    '                  Default folder: the repository root (the parent of this script).',
     '  --help          Print this help and exit.',
     '  --version       Print the version and exit.',
     '',
@@ -650,7 +799,7 @@ function usage() {
 }
 
 function parseArgs(argv) {
-  const out = { file: null };
+  const out = { file: null, live: false, port: null, serve: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--file' || a === '-f') {
@@ -659,6 +808,21 @@ function parseArgs(argv) {
       out.file = v;
     } else if (a.startsWith('--file=')) {
       out.file = a.slice('--file='.length);
+    } else if (a === '--live') {
+      out.live = true;
+    } else if (a === '--port' || a === '-p') {
+      const v = argv[++i];
+      if (!v) { fail('--port needs a number'); }
+      out.port = v;
+    } else if (a.startsWith('--port=')) {
+      out.port = a.slice('--port='.length);
+    } else if (a === '--serve') {
+      out.serve = true;
+      // Optional value: "--serve" alone serves the repository root, "--serve DIR" serves DIR.
+      if (argv[i + 1] && !argv[i + 1].startsWith('-')) { out.serve = argv[++i]; }
+    } else if (a.startsWith('--serve=')) {
+      out.serve = a.slice('--serve='.length);
+      if (out.serve === '') out.serve = true;
     } else if (a === '--help' || a === '-h') {
       process.stdout.write(usage() + '\n'); process.exit(0);
     } else if (a === '--version' || a === '-v') {
@@ -666,6 +830,14 @@ function parseArgs(argv) {
     } else {
       fail('Unknown argument: ' + a);
     }
+  }
+  if (out.port !== null) {
+    const n = Number(out.port);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) fail('--port must be an integer between 1 and 65535, got ' + out.port);
+    out.port = n;
+  }
+  if (out.serve && !out.live) {
+    fail('--serve only makes sense together with --live (it serves the page that attaches over WebSocket).');
   }
   return out;
 }
@@ -681,6 +853,11 @@ if (/\.lol$/i.test(STATE_FILE)) {
   fail('refusing to use a .lol file (' + STATE_FILE + '): this server only handles the AI-JSON exchange format. ' +
     'Point --file at a *.ai.json file.');
 }
+
+// ─── Live transport (--live) ─────────────────────────────────────────────────
+// LIVE is null in file mode: every tool below then behaves exactly as it did
+// before, with no socket, no timeout and no page.
+let LIVE = null;
 
 // ─── JSON-RPC / MCP plumbing ─────────────────────────────────────────────────
 function log(msg) {
@@ -702,8 +879,15 @@ function replyError(id, code, message, data) {
 
 const INSTRUCTIONS = [
   'Pixelol AI-JSON document: ' + STATE_FILE,
-  'Workflow: the human presses «Экспорт для ИИ» in Pixelol once per session and saves that file; you edit it ' +
-  'through get_canvas_state / draw_run / add_layer; the human then presses «Импорт от ИИ» and picks the same file.',
+  (LIVE && LIVE.hub.attached())
+    ? 'Workflow (LIVE): a Pixelol tab is attached. get_canvas_state reads that tab, so you see exactly what the ' +
+      'human sees; draw_run / add_layer are pushed to the canvas as they are made and the human watches them appear. ' +
+      'If a tool reports "proposed", the human has not confirmed the change yet in their window.'
+    : (LIVE
+      ? 'Workflow (live ready, no tab attached): start the Pixelol tab over http://127.0.0.1:' + LIVE.port + ' and ' +
+        'press the «🤖 Агент» button there to attach. Until then every call edits the file only.'
+      : 'Workflow: the human presses «Экспорт для ИИ» in Pixelol once per session and saves that file; you edit it ' +
+        'through get_canvas_state / draw_run / add_layer; the human then presses «Импорт от ИИ» and picks the same file.'),
   'Format: {meta:{project,geometry,note}, palette:["#rrggbb", ...] (max 36), layers:[{name, folder|null, ' +
   'bbox:{minCol,minRow,maxCol,maxRow}|null, rows:[...]}]}. layers[0] is the TOPMOST layer. rows[r][c] is the cell ' +
   'at col=bbox.minCol+c, row=bbox.minRow+r; "." = empty, "0".."9" = palette[0..9], "a".."z" = palette[10..35].',
@@ -731,7 +915,7 @@ function handleRequest(msg) {
       reply(msg.id, {});
       return;
     case 'tools/list':
-      reply(msg.id, { tools: TOOLS });
+      reply(msg.id, { tools: toolList() });
       return;
     case 'tools/call': {
       const params = msg.params || {};
@@ -746,21 +930,25 @@ function handleRequest(msg) {
         replyError(msg.id, -32602, '"arguments" must be an object.');
         return;
       }
-      let result;
-      try {
-        if (tool.name === 'get_canvas_state') result = toolGetCanvasState();
-        else if (tool.name === 'draw_run') result = toolDrawRun(args);
-        else result = toolAddLayer(args);
-      } catch (err) {
-        if (err instanceof ToolError) {
-          log('tool ' + tool.name + ' failed: ' + err.message);
-          result = errorResult(err.message);
-        } else {
-          log('tool ' + tool.name + ' crashed: ' + (err && err.stack ? err.stack : err));
-          result = errorResult('Internal server error: ' + (err && err.message ? err.message : String(err)));
-        }
-      }
-      reply(msg.id, result);
+      // The tools are async because live mode asks the attached tab for the
+      // current canvas and waits for its verdict. In file mode the promises
+      // resolve immediately, so nothing about that behaviour changes.
+      Promise.resolve()
+        .then(() => {
+          if (tool.name === 'get_canvas_state') return toolGetCanvasState();
+          if (tool.name === 'draw_run') return toolDrawRun(args);
+          return toolAddLayer(args);
+        })
+        .then(result => reply(msg.id, result))
+        .catch(err => {
+          if (err instanceof ToolError) {
+            log('tool ' + tool.name + ' failed: ' + err.message);
+            reply(msg.id, errorResult(err.message));
+          } else {
+            log('tool ' + tool.name + ' crashed: ' + (err && err.stack ? err.stack : err));
+            reply(msg.id, errorResult('Internal server error: ' + (err && err.message ? err.message : String(err))));
+          }
+        });
       return;
     }
     default:
@@ -818,6 +1006,41 @@ process.stdin.on('end', () => {
 });
 process.stdin.on('error', err => log('stdin error: ' + err.message));
 process.stdout.on('error', err => log('stdout error: ' + err.message));
+
+// ─── Boot ────────────────────────────────────────────────────────────────────
+log(SERVER_NAME + ' ' + SERVER_VERSION + ' ready — MCP over stdio, file: ' + STATE_FILE);
+
+if (ARGS.live) {
+  const serveDir = ARGS.serve === true ? path.join(__dirname, '..')
+    : (typeof ARGS.serve === 'string' ? path.resolve(ARGS.serve) : null);
+  startLiveServer({
+    port: ARGS.port || 8765,
+    serveDir: serveDir,
+    log: log,
+    serverInfo: { name: SERVER_NAME, version: SERVER_VERSION, file: STATE_FILE },
+  }).then(handle => {
+    LIVE = handle;
+    log('live mode ON — WebSocket on ' + handle.url + ' (bound to ' + handle.host + ' only)');
+    log('live mode: waiting for a Pixelol tab. Attach it from the «🤖 Агент» button inside the app.');
+    if (serveDir) {
+      log('live mode: serving ' + serveDir);
+      log('Open this in your browser:  ' + handle.httpUrl + 'index.html');
+      log('(a tab opened as a plain file — file:// — may be blocked from connecting; use the address above)');
+    } else {
+      log('live mode: no --serve, so serve the folder yourself, e.g.  python3 -m http.server 8080');
+    }
+  }).catch(err => {
+    if (err && err.code === 'EADDRINUSE') {
+      log('live mode FAILED: port ' + (ARGS.port || 8765) + ' is already in use. Another pixelol-ai (probably one ' +
+        'launched by an MCP client) is already running. Close it, or start this one with --port <other>.');
+    } else {
+      log('live mode FAILED: ' + (err && err.message ? err.message : err));
+    }
+    // MCP over stdio keeps working in file mode: a busy port must not take the
+    // whole server down, because that would break the agent's only channel.
+  });
+}
+
 process.on('uncaughtException', err => log('uncaught: ' + (err && err.stack ? err.stack : err)));
 
 log(SERVER_NAME + ' ' + SERVER_VERSION + ' ready — MCP over stdio, file: ' + STATE_FILE);
