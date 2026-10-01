@@ -70,9 +70,28 @@ grid at `0,0`, and says so in an import note. Do not rely on that — make it ag
 
 ### What import actually does
 
-Replaces the **pixel layers and the palette wholesale**. Reference (tracing) layers are not
-part of AI-JSON and are left alone. `Ctrl+Z` undoes the whole import. Confirm with the
-user before you hand them a document that deletes layers.
+Replaces the **pixel layers wholesale**. Reference (tracing) layers are not part of AI-JSON
+and are left alone. `Ctrl+Z` undoes the whole import. Confirm with the user before you hand
+them a document that deletes layers.
+
+**The swatch panel is merged, never replaced.** The document carries only the colours it
+actually used; the human's panel must keep its size. The rule the app applies
+(`_aiMergePanelPalette`):
+
+1. the document's colours first, in document order — the "used ones on top";
+2. then whatever was already on the panel and is not in the document — the human's own
+   colours, a `.lol` palette and colours extracted from an image are not dropped silently;
+3. then any still-missing factory-default colours.
+
+Trimmed to the panel's previous number of swatches, so a 2-colour document no longer wipes
+36 cells down to 2. One exception: if the document has more colours than the panel has cells,
+the panel grows to that count — otherwise document colours would vanish from it. The
+36-colour cap applies to the document, never to the panel.
+
+Never index into the panel when reasoning about a document. Characters always resolve
+through the document's own `palette` array (`_aiValidateJSON` stores resolved hex into the
+pixels), so a larger panel cannot repaint the drawing — this is also why the MCP `palette`
+argument stays append-only.
 
 ### Why this shape
 

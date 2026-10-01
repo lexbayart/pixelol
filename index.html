@@ -15842,9 +15842,64 @@ function _aiRebuildLayerOrder() {
   state.layerOrder = out;
   _ensureLayerOrder();
 }
+
+// ─── 6a. PANEL PALETTE = DOCUMENT COLOURS + THE PREVIOUS PANEL ─────────────────
+// The document palette and the swatch panel are different things. A document
+// carries ONLY its own colours (spec §4: it is rebuilt from the actual pixel
+// values), while the panel is what the human keeps drawing with. The import used
+// to overwrite the panel wholesale, so a two-colour drawing left two swatches
+// there instead of thirty-six.
+//
+// One merge rule, three steps:
+//   1) the document colours first, in document order  ("used ones on top");
+//   2) then whatever was already on the panel and is not in the document (the
+//      human's own colours, a .lol palette, colours extracted from an image —
+//      none of them are dropped silently);
+//   3) then the factory-default colours still missing (DEFAULT_PALETTE).
+// The result is trimmed to the PREVIOUS number of swatches, so the panel never
+// changes size. One exception: if the document brings more colours than the panel
+// has cells, the panel grows to that count — otherwise part of the document
+// would simply disappear from it.
+//
+// Colours are compared case-insensitively after trimming: #FFF and #ffffff are
+// one colour. A document colour keeps the spelling the document used; the rest
+// keep theirs. AI_INDEX_MAX (36) limits the DOCUMENT and does not apply here: the
+// panel is not a document, and DEFAULT_PALETTE decides its size, not the index grid.
+function _aiMergePanelPalette(docPalette, currentPalette, defaultPalette) {
+  const norm = c => String(c == null ? '' : c).trim().toLowerCase();
+  const doc = Array.isArray(docPalette) ? docPalette : [];
+  const cur = Array.isArray(currentPalette) ? currentPalette : [];
+  const def = Array.isArray(defaultPalette) ? defaultPalette : [];
+  // As many cells as before, never fewer than the document needs.
+  const size = Math.max(cur.length, doc.length);
+  const seen = new Set();
+  const out = [];
+  const take = (list) => {
+    for (let i = 0; i < list.length && out.length < size; i++) {
+      const c = list[i];
+      if (typeof c !== 'string' || !c.trim()) continue;
+      const key = norm(c);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(c.trim());
+    }
+  };
+  take(doc);
+  take(cur);
+  take(def);
+  return out;
+}
+
 function _aiApplyDocument(parsed) {
-  const newPalette = parsed.palette.slice();
+  const docPalette = parsed.palette.slice();
   const prevActive = state.activeLayerIdx;
+
+  // The panel after the import: document colours on top, previous panel below.
+  // Computed BEFORE saveHistory — the function is pure and never touches PALETTE,
+  // so the "saveHistory before any mutation" rule still holds. Pixels resolve
+  // against the DOCUMENT palette instead (_aiValidateJSON already stored resolved
+  // hex values in them), so extra panel cells cannot repaint the drawing.
+  const mergedPalette = _aiMergePanelPalette(docPalette, PALETTE, DEFAULT_PALETTE);
 
   // Структура готовится ДО saveHistory — это ещё не мутация state.
   const folderIdxs = new Map();
@@ -15874,12 +15929,15 @@ function _aiApplyDocument(parsed) {
   }
   _ensureLayerOrder(); // снапшот истории должен видеть корректный layerOrder
 
-  // ⚠ saveHistory ДО мутации — правило над saveHistory. isPaletteEntry + newPalette,
+  // ⚠ saveHistory ДО мутации — правило над saveHistory. isPaletteEntry + mergedPalette,
   // потому что импорт меняет палитру (иначе Ctrl+Z вернул бы её не полностью).
-  saveHistory('Импорт от ИИ', '🤖', null, { isPaletteEntry: true, newPalette: newPalette.slice() });
+  // newPalette here is the panel AFTER the merge (see _aiMergePanelPalette) —
+  // exactly what redo must restore; saveHistory snapshots the "before" itself,
+  // from the current PALETTE.
+  saveHistory('Импорт от ИИ', '🤖', null, { isPaletteEntry: true, newPalette: mergedPalette.slice() });
 
   PALETTE.length = 0;
-  newPalette.forEach(c => PALETTE.push(c));
+  mergedPalette.forEach(c => PALETTE.push(c));
   buildPalette();
   if (PALETTE.length > 0 && !PALETTE.some(c => c.toLowerCase() === String(state.fgColor).toLowerCase())) {
     state.fgColor = PALETTE[0];
@@ -15914,7 +15972,8 @@ function _aiApplyDocument(parsed) {
   render();
   return {
     layers: parsed.layers.length,
-    colors: newPalette.length,
+    colors: docPalette.length,   // how many colours the DOCUMENT brought
+    swatches: PALETTE.length,    // how many cells the panel holds in total
     pixels: parsed.layers.reduce((n, ld) => n + ld.pixels.size, 0),
   };
 }
@@ -16161,7 +16220,8 @@ function _aiImportText(text) {
   }
   const pixelCount = parsed.layers.reduce((n, ld) => n + ld.pixels.size, 0);
   const question = 'Импортировать ' + parsed.layers.length + ' слоёв (' + parsed.palette.length +
-    ' цветов, ' + pixelCount + ' пикселей)?\n\nПиксельные слои и палитра будут заменены. Ctrl+Z отменяет.';
+    ' цветов, ' + pixelCount + ' пикселей)?\n\nПиксельные слои будут заменены. Цвета рисунка встанут в начало ' +
+    'палитры, остальные образцы останутся на своих местах. Ctrl+Z отменяет.';
   let confirmed;
   try {
     confirmed = ui ? ui.confirm(question) : confirm(question);
@@ -16181,7 +16241,8 @@ function _aiImportText(text) {
   const notes = parsed.notes.length ? ('\n\n' + parsed.notes.join('\n')) : '';
   if (ui) {
     ui.status('✓ Импортировано: ' + result.layers + ' слоёв, ' + result.colors + ' цветов, ' +
-              result.pixels + ' пикселей. Ctrl+Z — отменить.' + notes, false);
+              result.pixels + ' пикселей. В палитре ' + result.swatches + ' образцов. ' +
+              'Ctrl+Z — отменить.' + notes, false);
   } else {
     _aiToast('Импортировано: ' + result.layers + ' слоёв, ' + result.pixels + ' пикселей', false);
     if (parsed.notes.length) alert('Импорт прошёл с замечаниями:\n\n' + parsed.notes.join('\n'));
