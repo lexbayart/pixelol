@@ -1986,6 +1986,8 @@
   <button class="menu-btn" onclick="openNewModal()" title="Новый холст">🆕</button>
   <button class="menu-btn" onclick="openSaveModal()" title="Сохранить / Экспорт">💾</button>
   <button class="menu-btn" onclick="triggerLoadLOL()" title="Открыть проект .lol" style="color:var(--accent3);">📂</button>
+  <button class="menu-btn" id="exportAIBtn" onclick="exportForAI()" title="Экспорт для ИИ" aria-label="Экспорт для ИИ">⬇</button>
+  <button class="menu-btn" id="importAIBtn" onclick="importFromAI()" title="Импорт от ИИ" aria-label="Импорт от ИИ">⬆</button>
 
   <!-- STROKE PANEL — shown when a pixel layer is active -->
   <div id="strokePanel">
@@ -2037,8 +2039,6 @@
     <div class="tool-sep"></div>
     <button class="tool-btn" onclick="undo()" title="Отмена (Ctrl+Z)">↩</button>
     <button class="tool-btn" onclick="redo()" title="Повтор (Ctrl+Y)">↪</button>
-    <button class="tool-btn" id="exportAIBtn" onclick="exportForAI()" title="Экспорт для ИИ" aria-label="Экспорт для ИИ">⬇</button>
-    <button class="tool-btn" id="importAIBtn" onclick="importFromAI()" title="Импорт от ИИ" aria-label="Импорт от ИИ">⬆</button>
 
     <div id="colors">
       <div id="recentColorsContainer"></div>
