@@ -16133,25 +16133,49 @@ function exportForAI() {
 }
 
 // ─── 9. ИМПОРТ ────────────────────────────────────────────────────────────────
+// Единая точка для любой жалобы на результат импорта. Правило простое: тишина —
+// худший вариант. Если открыт диалог импорта — пишем в его строку статуса,
+// иначе показываем тост (успех) или alert с полным текстом (ошибка).
+function _aiReport(msg, isError) {
+  const ui = _aiImportUI;
+  if (ui && typeof ui.status === 'function') { ui.status(msg, !!isError); return; }
+  if (isError) { alert(msg); return; }
+  _aiToast(msg, false);
+}
 function _aiImportText(text) {
   const ui = _aiImportUI;
-  const parsed = _aiValidateJSON(text);
+  let parsed;
+  try {
+    parsed = _aiValidateJSON(text);
+  } catch (err) {
+    // Валидация обязана только возвращать {ok:false}. Если она вдруг бросила
+    // исключение, человек всё равно должен увидеть, что произошло, — раньше
+    // это исключение уходило в FileReader.onload и исчезало без следа.
+    const msg = (err && err.message) ? err.message : String(err);
+    _aiReport('✗ Проверка файла не удалась: ' + msg, true);
+    return;
+  }
   if (!parsed.ok) {
-    if (ui) { ui.status('✗ ' + parsed.error, true); return; }
-    alert('Импорт от ИИ не удался:\n\n' + parsed.error);
+    _aiReport('✗ ' + parsed.error, true);
     return;
   }
   const pixelCount = parsed.layers.reduce((n, ld) => n + ld.pixels.size, 0);
   const question = 'Импортировать ' + parsed.layers.length + ' слоёв (' + parsed.palette.length +
     ' цветов, ' + pixelCount + ' пикселей)?\n\nПиксельные слои и палитра будут заменены. Ctrl+Z отменяет.';
-  if (!(ui ? ui.confirm(question) : confirm(question))) return;
+  let confirmed;
+  try {
+    confirmed = ui ? ui.confirm(question) : confirm(question);
+  } catch (err) {
+    _aiReport('✗ Браузер не показал вопрос о подтверждении — импорт отменён.', true);
+    return;
+  }
+  if (!confirmed) return;
   let result;
   try {
     result = _aiApplyDocument(parsed);
   } catch (err) {
     const msg = (err && err.message) ? err.message : String(err);
-    if (ui) { ui.status('✗ Импорт не применён: ' + msg, true); return; }
-    alert('Импорт от ИИ не удался:\n\n' + msg);
+    _aiReport('✗ Импорт не применён: ' + msg, true);
     return;
   }
   const notes = parsed.notes.length ? ('\n\n' + parsed.notes.join('\n')) : '';
@@ -16163,25 +16187,53 @@ function _aiImportText(text) {
     if (parsed.notes.length) alert('Импорт прошёл с замечаниями:\n\n' + parsed.notes.join('\n'));
   }
 }
+// Что приложение само и производит: «⬇ Скачать файл» пишет <проект>.ai.json,
+// а если проект сохраняли как .lol — <имя>.lol.ai.json. Плюс обычный .json,
+// если человек переименовал файл руками. accept — только подсказка для
+// диалога выбора; содержимое всё равно проверяет _aiValidateJSON.
+const AI_JSON_ACCEPT = '.json,.ai.json,application/json';
+// Единственная точка «файл → импорт» для кнопки «📂 Из файла» и для
+// перетаскивания файла в окно. Оба пути идут в _aiImportText, а значит в
+// _aiValidateJSON и _aiApplyDocument — валидация одна и та же.
+//
+// ВАЖНО ПОРЯДОК ДЕЙСТВИЙ: поле ввода НЕ обнуляется между выбором файла и
+// чтением. В WebKit (Safari) присваивание input.value = '' инвалидирует
+// снимок выбранного файла, и следующий FileReader.readAsText(file) бросает
+// NotFoundError. Раньше обнуление стояло ДО чтения, исключение уходило в
+// обработчик FileReader и проглатывалось — человек видел «ничего не
+// произошло». Рабочий путь .lol (loadLOLFromInput) значения не обнучает вовсе.
+function _aiImportFileObject(file) {
+  if (!file) return;
+  const name = (file && file.name) ? String(file.name) : '';
+  const tail = name ? ' «' + name + '»' : '';
+  const reader = new FileReader();
+  reader.onload = e => {
+    const result = (e && e.target) ? e.target.result : '';
+    _aiImportText(String(result == null ? '' : result));
+  };
+  reader.onerror = () => { _aiReport('✗ Не удалось прочитать файл' + tail + '.', true); };
+  reader.onabort = () => { _aiReport('✗ Чтение файла' + tail + ' прервано.', true); };
+  try {
+    reader.readAsText(file);
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    _aiReport('✗ Не удалось открыть файл' + tail + ': ' + msg, true);
+  }
+}
 function _aiPickFile() {
   let inp = document.getElementById('aiJsonFileInput');
   if (!inp) {
     inp = document.createElement('input');
     inp.type = 'file';
     inp.id = 'aiJsonFileInput';
-    inp.accept = '.json,application/json';
+    inp.accept = AI_JSON_ACCEPT;
     inp.style.display = 'none';
+    // Обнулять inp.value здесь НЕЛЬЗЯ: это ломает чтение выбранного файла
+    // (см. комментарий к _aiImportFileObject). Поле чистится только перед
+    // открытием диалога — этого достаточно, чтобы повторный выбор того же
+    // файла снова вызвал change.
     inp.addEventListener('change', () => {
-      const f = inp.files && inp.files[0];
-      inp.value = '';
-      if (!f) return;
-      const reader = new FileReader();
-      reader.onload = e => _aiImportText(String(e.target.result || ''));
-      reader.onerror = () => {
-        const msg = 'Не удалось прочитать файл.';
-        if (_aiImportUI) _aiImportUI.status('✗ ' + msg, true); else alert(msg);
-      };
-      reader.readAsText(f);
+      _aiImportFileObject(inp.files && inp.files[0]);
     });
     document.body.appendChild(inp);
   }
@@ -16203,7 +16255,16 @@ function importFromAI() {
   box.appendChild(status);
   _aiImportUI = {
     status: (msg, isError) => { status.style.color = isError ? '#f76a8a' : '#6af7c4'; status.textContent = msg; },
-    confirm: confirm,
+    // ⚠ НЕЛЬЗЯ писать `confirm: confirm`.
+    // window.confirm помечен в HTML-спецификации как [LegacyUnforgeable]:
+    // браузер бросает TypeError: Illegal invocation, если this — не окно.
+    // Раньше здесь лежала ссылка на confirm, и _aiImportText звал её как
+    // метод объекта (ui.confirm(...)) — this становился _aiImportUI, и
+    // браузер падал с TypeError прямо внутри обработчика FileReader.
+    // Исключение там никто не ловил, поэтому после выбора файла не
+    // происходило вообще ничего: ни импорта, ни ошибки, ни подсказки.
+    // Вызываем как обычную функцию: this — глобальный объект, то есть окно.
+    confirm: (msg) => window.confirm(msg),
   };
 
   const row = document.createElement('div');
@@ -16214,6 +16275,51 @@ function importFromAI() {
   box.appendChild(row);
   setTimeout(() => ta.focus(), 50);
 }
+
+// ─── 10. ПЕРЕТАСКИВАНИЕ ФАЙЛА В ОКНО ──────────────────────────────────────────
+// Тот же импорт, что и по кнопке «📂 Из файла»: файл → текст → _aiImportText →
+// _aiValidateJSON → подтверждение → _aiApplyDocument. Своего «упрощённого»
+// парсера здесь нет намеренно: проверка документа должна быть ровно та же,
+// что при выборе файла вручную. .lol сюда не попадает — его по-прежнему ловят
+// штатные обработчики, объявленные выше по файлу.
+
+// Имя файла → маршрут. 'ai-json' — наш импорт, 'lol' — не трогаем,
+// null — не наше (картинки и прочее), обработчики .lol и картинок
+// отработают как обычно.
+//   <проект>.ai.json    → ai-json  (так пишет «⬇ Скачать файл»)
+//   <имя>.lol.ai.json   → ai-json  (проект сохраняли как .lol)
+//   <что-то>.json       → ai-json  (человек переименовал вручную)
+//   <имя>.lol           → lol      (штатный путь, без изменений)
+function _aiRouteDroppedFile(name) {
+  const n = String(name == null ? '' : name).trim().toLowerCase();
+  if (!n) return null;
+  if (n.endsWith('.ai.json')) return 'ai-json';
+  if (n.endsWith('.lol')) return 'lol';
+  if (n.endsWith('.json')) return 'ai-json';
+  return null;
+}
+function _aiInitFileDrop() {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return;
+  // Захват на window срабатывает раньше всех обработчиков на canvas-area,
+  // панели слоёв и палитре, поэтому перетащенный AI-JSON физически не может
+  // дойти до _parseLOL / loadLOLFromInput. Файл, который не наш, мы не
+  // трогаем вообще: ни preventDefault, ни stopPropagation — остальные
+  // обработчики видят его ровно как раньше.
+  window.addEventListener('drop', e => {
+    const dt = e.dataTransfer;
+    const files = dt && dt.files ? Array.from(dt.files) : [];
+    let picked = null;
+    for (let i = 0; i < files.length; i++) {
+      if (_aiRouteDroppedFile(files[i] && files[i].name) === 'ai-json') { picked = files[i]; break; }
+    }
+    if (!picked) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+    _aiImportFileObject(picked);
+  }, true);
+}
+_aiInitFileDrop();
 
 // Подписи кнопок продублированы в разметке — на случай ручной правки index.html.
 (function _aiButtonTitles() {
