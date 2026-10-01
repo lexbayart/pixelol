@@ -10,6 +10,14 @@ You are the **second pair of hands**. The human draws with a mouse; you read the
 layers, colours and folders and change them the same way. You are not a simplified view of
 the canvas — it is exactly what the human sees in the layer panel.
 
+> ### ⚠ Read this before you draw anything
+>
+> This canvas is a **45° diamond lattice**, not an ordinary pixel grid. `bbox` and `rows` are
+> **logical** coordinates, **not a picture of what the screen shows**. Ordinary horizontal and
+> vertical pixel art written into `rows` renders **slanted at 45°**.
+>
+> **You MUST read «How to draw in this medium» in this file before producing any drawing.**
+
 ## What you must not break
 
 - **The single-file promise.** New app code goes into the one marked block at the end of
