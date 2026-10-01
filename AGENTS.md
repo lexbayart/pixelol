@@ -83,6 +83,89 @@ human can pick any colour with the colour picker, so the swatches lie.
 
 ---
 
+## How to draw in this medium
+
+**`bbox` and `rows` are the LOGICAL grid, not a picture of the canvas.** The canvas is a
+diamond lattice: every cell is a square rotated 45°. `cellToScreen` (`index.html:11758`) is the
+whole truth:
+
+```js
+x: vp.tx + (col - row) * step,
+y: vp.ty + (col + row) * step,
+```
+
+So `+1 col` is *down-and-right* on screen and `+1 row` is *down-and-left*. On screen each cell's
+four edge-sharing neighbours are its logical up/down/left/right ones — and **every visible edge
+runs at 45°**. `rows[0]` is the upper-left diagonal of the drawing, not its top line.
+
+### Screen direction → coordinate delta
+
+| Screen direction | Δcol | Δrow | Δx | Δy |
+|---|---|---|---|---|
+| up    | −1 | −1 | 0 | −2·step |
+| down  | +1 | +1 | 0 | +2·step |
+| right | +1 | −1 | +2·step | 0 |
+| left  | −1 | +1 | −2·step | 0 |
+
+### Strokes
+
+| On screen you want | Step in `rows` | Neighbouring cells |
+|---|---|---|
+| flat horizontal line | `col+1, row−1` | touch at their side tips |
+| flat vertical line | `col+1, row+1` | touch at their side tips |
+| 45° line, upper-left → lower-right | `col+1, row` (one flat run inside one `rows[r]`) | share a full edge |
+| 45° line, upper-right → lower-left | `row+1` (one flat run down one column) | share a full edge |
+
+### Worked example — the same 5×5 box, wrong and right
+
+Naive — it *looks* like a sprite in the JSON; on screen it is a diamond pointing up:
+
+```text
+11111      ← on screen: rotated square, corners at top / bottom / left / right
+12221
+12221
+12221
+11111
+```
+
+Correct — the same upright box on screen, written as a ring of single cells:
+
+```text
+..1..
+.1.1.
+1...1
+.1.1.
+..1..
+```
+
+### The reliable recipe
+
+Work in the two sums the formula actually uses, then convert back:
+
+1. `u = col - row` is **right** on screen, `v = col + row` is **down**.
+2. Draw the shape as an ordinary horizontal/vertical picture in `u,v`.
+3. Keep only points where `u - v` is even — a cell centre exists only there.
+4. Convert back: `col = (u+v)/2`, `row = (v-u)/2`.
+
+Verified round-trips: screen disc `u²+v² ≤ 16` → five rows of `"11111"`;
+screen disc `u²+v² ≤ 9` → `"..1.."`, `".111."`, `"11111"`, `".111."`, `"..1.."`.
+Small shapes lose detail: below radius ~4 a circle reads as a diamond, because the lattice is
+half as dense as an ordinary pixel grid.
+
+### Symmetry, circles, rhombi
+
+- Mirror across the **vertical** screen axis: `(col,row) → (row,col)` — i.e. **transpose the
+  grid**. Verified: it negates `wx` and preserves `wy`.
+- Mirror across the **horizontal** screen axis: `(col,row) → (−row,−col)`.
+- A rhombus with its points at top/bottom/left/right on screen is a plain H/V-filled block in
+  `rows`; an upright square on screen is a diamond / checker pattern there. The duality holds
+  both ways.
+
+Everything comes out straight and level (`ровно`) as long as these deltas are followed step by
+step. Only tilt it when the user asks for it.
+
+---
+
 ## Level 0 — manual exchange
 
 Press **⬇ «Экспорт для ИИ»** → **«📋 Копировать»** → paste into a chat → paste the edited
@@ -146,6 +229,10 @@ Then the human presses **⬆ «Импорт от ИИ»** → **«📂 Из фа
 ## Working rules
 
 - Read before you write. `get_canvas_state` first, always.
+- Draw for what the human **sees**, not for what the JSON looks like. `rows` is a diamond
+  lattice, not a picture of the canvas: screen right is `col+1, row−1`, screen down is
+  `col+1, row+1`, and a plain run of characters inside one row is a 45° line on screen. See
+  «How to draw in this medium».
 - Never invent fields. If `index.html` cannot read it, it does not belong in the document.
 - Never shrink a bbox to fit a smaller grid — pad the rows instead. The two must agree.
 - Keep the palette at 36 colours or fewer. A drawing that needs more fails the export
