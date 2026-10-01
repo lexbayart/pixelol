@@ -2037,6 +2037,8 @@
     <div class="tool-sep"></div>
     <button class="tool-btn" onclick="undo()" title="Отмена (Ctrl+Z)">↩</button>
     <button class="tool-btn" onclick="redo()" title="Повтор (Ctrl+Y)">↪</button>
+    <button class="tool-btn" id="exportAIBtn" onclick="exportForAI()" title="Экспорт для ИИ" aria-label="Экспорт для ИИ">⬇</button>
+    <button class="tool-btn" id="importAIBtn" onclick="importFromAI()" title="Импорт от ИИ" aria-label="Импорт от ИИ">⬆</button>
 
     <div id="colors">
       <div id="recentColorsContainer"></div>
@@ -15430,6 +15432,634 @@ requestAnimationFrame(() => {
     renderPixelolPreview();
   }
 });
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  БЛОК «AI-АГЕНТ» — ЭКСПОРТ / ИМПОРТ ХОЛСТА В JSON  (уровень 0 по ТЗ)        ║
+// ╠══════════════════════════════════════════════════════════════════════════════╣
+// ║  Назначение: производный обмен состоянием холста с ИИ-агентом (ТЗ §5 + §6.0). ║
+// ║  Формат .lol и код _doSaveLOL / loadLOLFromInput / _parseLOL НЕ тронуты,      ║
+// ║  AI-JSON никогда не подаётся в loadLOLFromInput (ТЗ §7).                     ║
+// ║  Весь новый код приложения — только здесь, в конце файла (ТЗ §7).             ║
+// ║                                                                              ║
+// ║  СХЕМА СИМВОЛОВ ИНДЕКС-СЕТКИ (одна на обе стороны — export и import):         ║
+// ║    «.»      — пустая клетка (пикселя нет)                                      ║
+// ║    «0»…«9»  — индексы 0…9 палитры                                             ║
+// ║    «a»…«z»  — индексы 10…35 палитры                                           ║
+// ║  Регистр не важен: «A» читается как «a» (индекс 10), на экспорте всегда       ║
+// ║  нижний регистр. Предел — 36 цветов (AI_INDEX_MAX); если цветов больше,        ║
+// ║  экспорт прерывается понятным сообщением, а не молча обрезает палитру.         ║
+// ║                                                                              ║
+// ║  КООРДИНАТЫ: col/row — целочисленная логическая сетка 45° (не пиксели экрана).  ║
+// ║  rows[row - minRow][col - minCol] = символ. Строки идут сверху вниз, символы   ║
+// ║  слева направо. Ширина строки = maxCol-minCol+1, строк = maxRow-minRow+1.     ║
+// ║  Пустой слой: bbox = null, rows = [].                                          ║
+// ║                                                                              ║
+// ║  ПОРЯДОК СЛОЁВ: layers[0] — самый верхний слой (порядок state.layerOrder,      ║
+// ║  layerOrder[0] = topmost), дальше вниз. folder — имя папки (null = без папки).  ║
+// ║                                                                              ║
+// ║  ПАЛИТРА пересобирается из ФАКТИЧЕСКИХ значений в pixels всех слоёв (ТЗ §4),   ║
+// ║  а не из PALETTE: fgColor приходит из <input type=color">, поэтому на холсте   ║
+// ║  лежат цвета, которых в палитре никогда не было.                                ║
+// ║                                                                              ║
+// ║  ПРАВИЛО ИСТОРИИ (см. блок правил над saveHistory): saveHistory MUST быть      ║
+// ║  вызван ДО мутации — здесь ровно один вызов, до первого изменения state.        ║
+// ║  Импорт меняет и слои, и палитру, поэтому opts.isPaletteEntry=true +            ║
+// ║  newPalette, иначе Ctrl+Z вернул бы палитру неправильно.                        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+// ─── 1. КОНСТАНТЫ ФОРМАТА ─────────────────────────────────────────────────────
+const AI_INDEX_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz'; // base-36, всегда нижний регистр
+const AI_INDEX_MAX      = AI_INDEX_ALPHABET.length;               // 36
+const AI_CELL_EMPTY     = '.';
+const AI_MAX_GRID_SIDE  = 1024;   // предохранитель от абсурдной сетки (чтобы не вешать вкладку)
+const AI_NOTE = 'col/row — логические координаты сетки; холст без границ, хранится только bbox каждого слоя';
+
+// Живой статус открытого диалога импорта: и вставка из textarea, и загрузка из
+// файла пишут результат в одно и то же место.
+let _aiImportUI = null;
+
+// ─── 2. СХЕМА СИМВОЛОВ ИНДЕКС-СЕТКИ ───────────────────────────────────────────
+// index → символ и обратно. Единственное место, где живёт эта договорённость.
+function _aiIndexChar(idx) {
+  if (!Number.isFinite(idx) || idx < 0 || idx >= AI_INDEX_MAX) return null;
+  return AI_INDEX_ALPHABET[idx];
+}
+function _aiIndexValue(ch) {
+  return AI_INDEX_ALPHABET.indexOf(String(ch).toLowerCase());
+}
+
+// ─── 3. ГЕОМЕТРИЯ КАК ДАННЫЕ (ТЗ §10 шаг 2) ────────────────────────────────────
+// meta.geometry собирается из НАСТОЯЩИХ функций cellToScreen / screenToCell:
+// линейная карта измеряется вызовами, угол и формулы выводятся из коэффициентов.
+// Строка нигде не дублируется текстом, поэтому разъехаться с кодом не может.
+function _aiProbeGeometry() {
+  const p00 = cellToScreen(0, 0);
+  const p10 = cellToScreen(1, 0);
+  const p01 = cellToScreen(0, 1);
+  // vp.tx / vp.ty сокращаются при вычитании — остаётся чистая линейная часть.
+  const a = p10.x - p00.x;   // ∂wx/∂col
+  const b = p01.x - p00.x;   // ∂wx/∂row
+  const c = p10.y - p00.y;   // ∂wy/∂col
+  const d = p01.y - p00.y;   // ∂wy/∂row
+  const scale = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
+  if (!isFinite(scale) || scale <= 1e-9) return null;
+  const deg = Math.atan2(c, a) * 180 / Math.PI;                 // угол поворота базовой оси col
+  const cos = a / scale, sin = c / scale;
+  const symmetric = Math.abs(Math.abs(a) - Math.abs(c)) <= 1e-9 * scale; // |cos| == |sin| → 1:1
+  // Обратимость проверяем настоящим screenToCell, а не предполагаем её.
+  const probe = cellToScreen(3, -2);
+  const back  = screenToCell(probe.x, probe.y);
+  return {
+    deg: deg, cos: cos, sin: sin, symmetric: symmetric,
+    wx: { col: a / scale, row: b / scale },
+    wy: { col: c / scale, row: d / scale },
+    invertible: back.col === 3 && back.row === -2,
+  };
+}
+// Печатает линейную комбинацию вида «col-row» / «col+row» из измеренных коэффициентов.
+function _aiLinearExpr(axis) {
+  const q  = v => Math.round(v * 1e6) / 1e6;
+  const kc = q(axis.col), kr = q(axis.row);
+  const out = [];
+  if (kc !== 0) out.push(kc === 1 ? 'col' : (kc === -1 ? '-col' : kc + '*col'));
+  if (kr !== 0) {
+    if (out.length === 0) out.push(kr === 1 ? 'row' : (kr === -1 ? '-row' : kr + '*row'));
+    else if (kr === -1)   out.push('-row');
+    else if (kr === 1)    out.push('+row');
+    else                  out.push((kr > 0 ? '+' : '') + kr + '*row');
+  }
+  return out.length ? out.join('') : '0';
+}
+function _aiGeometryString() {
+  const p = _aiProbeGeometry();
+  if (!p) return 'unknown — геометрия не измерилась, см. cellToScreen/screenToCell';
+  const degStr = String(Math.round(p.deg * 1e4) / 1e4);
+  const ratio  = Math.abs(p.sin) > 1e-12 ? (Math.abs(p.cos) / Math.abs(p.sin)) : Infinity;
+  const symStr = p.symmetric ? '1:1' : (isFinite(ratio) ? (Math.round(ratio * 1e4) / 1e4) + ':1' : 'n/a');
+  return degStr + 'deg-rotated-square, symmetric ' + symStr +
+         '; wx=(' + _aiLinearExpr(p.wx) + ')*step; wy=(' + _aiLinearExpr(p.wy) + ')*step';
+}
+
+// ─── 4. СЕРИАЛИЗАЦИЯ (EXPORT) ─────────────────────────────────────────────────
+// Порядок слоёв сверху вниз — ровно как в панели слоёв (layerOrder[0] = topmost).
+function _aiLayerIndexOrder() {
+  _ensureLayerOrder();
+  return state.layerOrder
+    .filter(e => e && e.type === 'pixel' && state.layers[e.idx])
+    .map(e => e.idx);
+}
+// ТЗ §4: палитра собирается из фактических значений pixels, а не из PALETTE.
+function _aiActualPalette(layerIdxs) {
+  const byKey = new Map(); // lowercase hex -> { hex, index }
+  layerIdxs.forEach(i => {
+    const l = state.layers[i];
+    if (!l || !l.pixels) return;
+    for (const color of l.pixels.values()) {
+      const hex = String(color == null ? '' : color).trim();
+      if (!hex) continue;
+      const key = hex.toLowerCase();
+      if (!byKey.has(key)) byKey.set(key, { hex: hex, index: byKey.size });
+    }
+  });
+  return byKey;
+}
+function _aiFolderNameOf(layer) {
+  if (!layer || layer.folderIdx === undefined || layer.folderIdx < 0) return null;
+  const f = (state.folders || [])[layer.folderIdx];
+  return f && f.name ? String(f.name) : null;
+}
+function _aiSerializeLayer(layer, colorIndex) {
+  const name   = (layer && layer.name) ? String(layer.name) : 'Слой';
+  const folder = _aiFolderNameOf(layer);
+  let minCol = Infinity, maxCol = -Infinity, minRow = Infinity, maxRow = -Infinity, count = 0;
+  if (layer && layer.pixels) {
+    for (const key of layer.pixels.keys()) {
+      const comma = key.indexOf(',');
+      const col = +key.slice(0, comma);
+      const row = +key.slice(comma + 1);
+      if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
+      count++;
+      if (col < minCol) minCol = col;
+      if (col > maxCol) maxCol = col;
+      if (row < minRow) minRow = row;
+      if (row > maxRow) maxRow = row;
+    }
+  }
+  if (count === 0) return { name: name, folder: folder, bbox: null, rows: [] };
+
+  const w = maxCol - minCol + 1;
+  const h = maxRow - minRow + 1;
+  if (w > AI_MAX_GRID_SIDE || h > AI_MAX_GRID_SIDE) {
+    throw new Error('слой «' + name + '» слишком большой: ' + w + '×' + h + ' клеток (предел ' + AI_MAX_GRID_SIDE + ')');
+  }
+  const grid = new Array(h);
+  for (let r = 0; r < h; r++) grid[r] = new Array(w).fill(AI_CELL_EMPTY);
+
+  for (const entry of layer.pixels) {
+    const key = entry[0], color = entry[1];
+    const comma = key.indexOf(',');
+    const col = +key.slice(0, comma);
+    const row = +key.slice(comma + 1);
+    if (!Number.isFinite(col) || !Number.isFinite(row)) continue;
+    const known = colorIndex.get(String(color == null ? '' : color).trim().toLowerCase());
+    const ch = _aiIndexChar(known ? known.index : -1);
+    if (ch === null) throw new Error('цвет ' + color + ' не попал в палитру слоя «' + name + '»');
+    grid[row - minRow][col - minCol] = ch;
+  }
+  return {
+    name: name,
+    folder: folder,
+    bbox: { minCol: minCol, minRow: minRow, maxCol: maxCol, maxRow: maxRow },
+    rows: grid.map(r => r.join('')),
+  };
+}
+// Чистая точка входа для автоматизации (будущий MCP-мост): возвращает строку JSON.
+function _aiBuildExportJSON() {
+  const idxs = _aiLayerIndexOrder();
+  const colorIndex = _aiActualPalette(idxs);
+  if (colorIndex.size > AI_INDEX_MAX) {
+    throw new Error('на холсте ' + colorIndex.size + ' цветов, ИИ-схема держит максимум ' + AI_INDEX_MAX);
+  }
+  const doc = {
+    meta: {
+      project: _lastLolName || 'pixelol_project',
+      geometry: _aiGeometryString(),
+      note: AI_NOTE,
+    },
+    palette: Array.from(colorIndex.values()).map(e => e.hex),
+    layers: idxs.map(i => _aiSerializeLayer(state.layers[i], colorIndex)),
+  };
+  return JSON.stringify(doc);
+}
+
+// ─── 5. ВАЛИДАЦИЯ (IMPORT) ────────────────────────────────────────────────────
+// Возвращает { ok:false, error } либо { ok:true, palette, layers, notes }.
+// doc.layers[i] = { name, folder, pixels: Map<"col,row", hex> } — уже готово к применению.
+function _aiValidateJSON(text) {
+  const fail = error => ({ ok: false, error: error });
+  if (typeof text !== 'string' || !text.trim()) return fail('Пусто — вставь JSON, полученный от агента.');
+  let raw;
+  try { raw = JSON.parse(text); }
+  catch (err) { return fail('Не удалось разобрать JSON: ' + (err && err.message ? err.message : err)); }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return fail('Ожидался объект JSON с ключами meta / palette / layers.');
+
+  if (!Array.isArray(raw.palette)) return fail('Нет массива «palette».');
+  if (raw.palette.length > AI_INDEX_MAX) {
+    return fail('В палитре ' + raw.palette.length + ' цветов, максимум ' + AI_INDEX_MAX + '.');
+  }
+  const palette = [];
+  for (let i = 0; i < raw.palette.length; i++) {
+    const c = raw.palette[i];
+    if (typeof c !== 'string' || !/^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(c.trim())) {
+      return fail('palette[' + i + '] = ' + JSON.stringify(c) + ' — ожидается цвет вида #rgb или #rrggbb.');
+    }
+    palette.push(c.trim());
+  }
+
+  if (raw.layers !== undefined && !Array.isArray(raw.layers)) return fail('Поле «layers» должно быть массивом.');
+  const notes = [];
+  const layers = [];
+  const rawLayers = Array.isArray(raw.layers) ? raw.layers : [];
+  for (let li = 0; li < rawLayers.length; li++) {
+    const ld = rawLayers[li];
+    if (!ld || typeof ld !== 'object' || Array.isArray(ld)) return fail('layers[' + li + '] — ожидается объект слоя.');
+    const name = (typeof ld.name === 'string' && ld.name.trim()) ? ld.name.trim() : ('Слой ' + (li + 1));
+    const label = '«' + name + '»';
+    const folder = (typeof ld.folder === 'string' && ld.folder.trim()) ? ld.folder.trim() : null;
+
+    if (!Array.isArray(ld.rows)) return fail('Слой ' + label + ': нет массива «rows».');
+    const rows = ld.rows;
+    for (let r = 0; r < rows.length; r++) {
+      if (typeof rows[r] !== 'string') return fail('Слой ' + label + ': rows[' + r + '] — не строка.');
+    }
+    if (rows.length === 0) { layers.push({ name: name, folder: folder, pixels: new Map() }); continue; }
+
+    const w = rows[0].length;
+    if (w === 0) return fail('Слой ' + label + ': строки пустые.');
+    for (let r = 1; r < rows.length; r++) {
+      if (rows[r].length !== w) {
+        return fail('Слой ' + label + ': все строки должны быть одной длины (строка ' + r + ' — ' +
+                    rows[r].length + ' символов, ожидалось ' + w + ').');
+      }
+    }
+    if (w > AI_MAX_GRID_SIDE || rows.length > AI_MAX_GRID_SIDE) {
+      return fail('Слой ' + label + ': сетка ' + w + '×' + rows.length + ' слишком велика (предел ' +
+                  AI_MAX_GRID_SIDE + '×' + AI_MAX_GRID_SIDE + ').');
+    }
+
+    // bbox: если он расходится с размерами rows — доверяем rows (они однозначны),
+    // исходные координаты показываем в отчёте, чтобы их можно было поправить.
+    let minCol = 0, minRow = 0;
+    const bb = ld.bbox;
+    if (bb && typeof bb === 'object' && !Array.isArray(bb)) {
+      const nums = ['minCol', 'minRow', 'maxCol', 'maxRow'].map(k => {
+        const v = bb[k];
+        return (typeof v === 'number') ? v : ((typeof v === 'string' && v.trim() !== '') ? +v : NaN);
+      });
+      const whole = nums.every(n => Number.isFinite(n) && Math.abs(n - Math.trunc(n)) < 1e-9);
+      if (whole && nums[2] >= nums[0] && nums[3] >= nums[1]) {
+        if (nums[2] - nums[0] + 1 === w && nums[3] - nums[1] + 1 === rows.length) {
+          minCol = nums[0]; minRow = nums[1];
+        } else {
+          notes.push('Слой ' + label + ': bbox не совпадает с сеткой ' + w + '×' + rows.length +
+                     ' — оставлены исходные координаты {minCol:' + nums[0] + ', minRow:' + nums[1] +
+                     ', maxCol:' + nums[2] + ', maxRow:' + nums[3] + '}.');
+        }
+      } else {
+        notes.push('Слой ' + label + ': bbox некорректен — координаты выведены из rows (начало в 0,0).');
+      }
+    } else if (bb !== undefined && bb !== null) {
+      notes.push('Слой ' + label + ': bbox непонятен — координаты выведены из rows (начало в 0,0).');
+    }
+
+    const pixels = new Map();
+    for (let r = 0; r < rows.length; r++) {
+      const line = rows[r];
+      for (let c = 0; c < w; c++) {
+        const ch = line[c];
+        if (ch === AI_CELL_EMPTY) continue;
+        const idx = _aiIndexValue(ch);
+        if (idx < 0) {
+          return fail('Слой ' + label + ', строка ' + r + ', столбец ' + c + ': символ «' + ch +
+                      '» недопустим — только «.» или цифры 0-9 и буквы a-z.');
+        }
+        if (idx >= palette.length) {
+          return fail('Слой ' + label + ', строка ' + r + ', столбец ' + c + ': индекс ' + idx +
+                      ' вне палитры (в палитре ' + palette.length + ' цветов).');
+        }
+        pixels.set((c + minCol) + ',' + (r + minRow), palette[idx]);
+      }
+    }
+    layers.push({ name: name, folder: folder, pixels: pixels });
+  }
+  return { ok: true, palette: palette, layers: layers, notes: notes };
+}
+
+// ─── 6. ПРИМЕНЕНИЕ (IMPORT) ───────────────────────────────────────────────────
+// Единственное место, где мутируется state. Всё, что может не сработать, уже
+// проверено в _aiValidateJSON, поэтому здесь исключений не ожидается.
+function _aiRebuildLayerOrder() {
+  // Порядок из JSON (layers[0] — верхний) раскладывается в те же позиции layerOrder,
+  // где раньше стояли пиксельные слои: референсы остаются на своих местах, а порядок
+  // слоёв сверху вниз сохраняется целиком. Лишние слои (их больше, чем было пиксельных
+  // слотов) вставляются сразу под последним слотом; если пиксельных слотов не было
+  // вовсе — сверху, как это делает _ensureLayerOrder для новых слоёв.
+  const old = Array.isArray(state.layerOrder) ? state.layerOrder : [];
+  const out = [];
+  let p = 0, insertAt = -1;
+  for (const e of old) {
+    if (!e) continue;
+    if (e.type === 'pixel') {
+      if (p < state.layers.length) { out.push({ type: 'pixel', idx: p++ }); insertAt = out.length; }
+    } else if (e.type === 'ref') {
+      out.push({ type: 'ref', idx: e.idx });
+    }
+  }
+  const extra = [];
+  for (let i = p; i < state.layers.length; i++) extra.push({ type: 'pixel', idx: i });
+  if (extra.length) out.splice(insertAt < 0 ? 0 : insertAt, 0, ...extra);
+  state.layerOrder = out;
+  _ensureLayerOrder();
+}
+function _aiApplyDocument(parsed) {
+  const newPalette = parsed.palette.slice();
+  const prevActive = state.activeLayerIdx;
+
+  // Структура готовится ДО saveHistory — это ещё не мутация state.
+  const folderIdxs = new Map();
+  const folderNames = [];
+  const newLayers = parsed.layers.map(ld => {
+    const layer = mkLayer(ld.name, new Map());
+    let folderIdx = -1;
+    if (ld.folder) {
+      if (!folderIdxs.has(ld.folder)) { folderIdxs.set(ld.folder, folderNames.length); folderNames.push(ld.folder); }
+      folderIdx = folderIdxs.get(ld.folder);
+    }
+    layer.folderIdx = folderIdx;
+    return layer;
+  });
+  if (newLayers.length === 0) newLayers.push(mkLayer('Слой 1', new Map()));
+
+  // ─── МУТАЦИЯ ───
+  // Тот же порядок, что в импорте .lol: сначала гасим незавершённые drag/float,
+  // иначе их индексы останутся висеть на уже заменённых слоях.
+  _suppressLayersPanelRebuild = true;
+  try {
+    if (_floatingLayerIdx !== null) _cancelFloat();
+    if (_floatingRefIdx !== null) _cancelRefFloat();
+    if (_floatingFolderIdx !== null) _cancelFolderFloat();
+  } finally {
+    _suppressLayersPanelRebuild = false;
+  }
+  _ensureLayerOrder(); // снапшот истории должен видеть корректный layerOrder
+
+  // ⚠ saveHistory ДО мутации — правило над saveHistory. isPaletteEntry + newPalette,
+  // потому что импорт меняет палитру (иначе Ctrl+Z вернул бы её не полностью).
+  saveHistory('Импорт от ИИ', '🤖', null, { isPaletteEntry: true, newPalette: newPalette.slice() });
+
+  PALETTE.length = 0;
+  newPalette.forEach(c => PALETTE.push(c));
+  buildPalette();
+  if (PALETTE.length > 0 && !PALETTE.some(c => c.toLowerCase() === String(state.fgColor).toLowerCase())) {
+    state.fgColor = PALETTE[0];
+  }
+  updateSwatches();
+
+  state.folders = folderNames.map(name => mkFolder(name, 0));
+  state.layers = newLayers;
+  // Референсы в AI-JSON не попадают, поэтому их folderIdx может выйти за диапазон
+  // новых папок — такой слой просто окажется вне папки, а не потеряется.
+  state.refLayers.forEach(rl => {
+    if (rl.folderIdx >= state.folders.length) rl.folderIdx = -1;
+  });
+  _aiRebuildLayerOrder();
+  _recomputeAllFolderOrderPos();
+  state.activeLayerIdx = 0;
+
+  // Пиксели — только через штатный путь записи setPixel(): он же держит
+  // _dirtyBbox, блокировку и правила клиппинга, импорт ничего не обходит.
+  parsed.layers.forEach((ld, li) => {
+    if (li >= state.layers.length) return;
+    state.activeLayerIdx = li;
+    for (const kv of ld.pixels) {
+      const comma = kv[0].indexOf(',');
+      setPixel(+kv[0].slice(0, comma), +kv[0].slice(comma + 1), kv[1]);
+    }
+  });
+
+  state.activeLayerIdx = Math.max(0, Math.min(prevActive, state.layers.length - 1));
+  _activeFolderIdx = -1;
+  renderLayersPanel();
+  render();
+  return {
+    layers: parsed.layers.length,
+    colors: newPalette.length,
+    pixels: parsed.layers.reduce((n, ld) => n + ld.pixels.size, 0),
+  };
+}
+
+// ─── 7. МЕЛОЧИ UI ─────────────────────────────────────────────────────────────
+function _aiEscapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function _aiToast(msg, isError) {
+  const old = document.getElementById('aiToast');
+  if (old) old.remove();
+  const t = document.createElement('div');
+  t.id = 'aiToast';
+  t.style.cssText = 'position:fixed;bottom:48px;left:50%;transform:translateX(-50%);background:' +
+    (isError ? '#f76a8a' : '#6af7c4') + ';color:#0e0e12;padding:10px 20px;border-radius:8px;' +
+    'font-family:JetBrains Mono,monospace;font-size:13px;font-weight:700;z-index:300;pointer-events:none;' +
+    'box-shadow:0 4px 20px rgba(0,0,0,0.5);max-width:70vw;';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.transition = 'opacity 0.4s'; t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 3200);
+}
+function _aiModal(title, hint, onClose) {
+  const old = document.getElementById('aiDialog');
+  if (old) old.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'aiDialog';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:200;backdrop-filter:blur(6px);font-family:JetBrains Mono,monospace;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#16161e;border:1px solid #2e2e42;border-radius:14px;padding:24px 28px;width:min(760px,92vw);max-height:88vh;overflow:auto;color:#e8e8f0;';
+  box.innerHTML = '<div style="font-size:18px;margin-bottom:8px;">' + _aiEscapeHtml(title) + '</div>' +
+                  '<div style="font-size:12px;color:#888899;margin-bottom:14px;line-height:1.6;">' + hint + '</div>';
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', e => {
+    if (e.target !== overlay) return;
+    if (onClose) onClose();
+    overlay.remove();
+  });
+  return { overlay: overlay, box: box };
+}
+function _aiTextArea(readonly) {
+  const ta = document.createElement('textarea');
+  ta.spellcheck = false;
+  ta.wrap = 'off';
+  ta.readOnly = !!readonly;
+  ta.style.cssText = 'width:100%;height:200px;background:#0e0e12;border:1px solid #2e2e42;border-radius:7px;' +
+    'color:#e8e8f0;padding:10px;font-family:JetBrains Mono,monospace;font-size:12px;line-height:1.45;resize:vertical;';
+  return ta;
+}
+function _aiButton(label, primary, onClick) {
+  const b = document.createElement('button');
+  b.textContent = label;
+  b.style.cssText = 'flex:1;background:' + (primary ? '#6af7c4' : '#1e1e2a') + ';color:' + (primary ? '#0e0e12' : '#e8e8f0') +
+    ';border:1px solid #2e2e42;border-radius:8px;padding:11px;font-family:JetBrains Mono,monospace;font-size:13px;' +
+    (primary ? 'font-weight:700;' : '') + 'cursor:pointer;';
+  b.addEventListener('click', onClick);
+  return b;
+}
+function _aiStatusLine() {
+  const d = document.createElement('div');
+  d.style.cssText = 'font-size:12px;line-height:1.6;margin-top:12px;color:#888899;white-space:pre-wrap;';
+  return d;
+}
+function _aiDownloadJSON(json, fileName) {
+  const blob = new Blob([json], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+}
+// navigator.clipboard, фолбэк — execCommand на том же textarea. Без библиотек.
+async function _aiCopyText(text, ta) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (err) { /* не сработало — пробуем фолбэк */ }
+  try {
+    ta.focus();
+    ta.setSelectionRange(0, text.length);
+    return !!document.execCommand('copy');
+  } catch (err) {
+    return false;
+  }
+}
+
+// ─── 8. ЭКСПОРТ ───────────────────────────────────────────────────────────────
+function exportForAI() {
+  _sfx.click();
+  let json;
+  try {
+    json = _aiBuildExportJSON();
+  } catch (err) {
+    _aiToast('Экспорт для ИИ не удался: ' + (err && err.message ? err.message : err), true);
+    return;
+  }
+  let geometry = '';
+  try { geometry = JSON.parse(json).meta.geometry; } catch (err) { geometry = ''; }
+  const probe = _aiProbeGeometry();
+  const fileName = (_lastLolName || 'pixelol').replace(/[\\/:*?"<>|]/g, '_') + '.ai.json';
+
+  const { box } = _aiModal('🤖 Экспорт для ИИ',
+    'JSON-схема обмена с ИИ-агентом (ТЗ §5): <b>⬇ Скачать</b> или <b>📋 Копировать</b> → вставить в чат ' +
+    'с агентом → получить изменённый JSON → <b>⬆ Импорт от ИИ</b>.<br>' +
+    'Геометрия собрана из кода холста: <code>' + _aiEscapeHtml(geometry) + '</code>' +
+    (probe ? (probe.invertible ? ' · screenToCell(cellToScreen(3,−2)) = (3,−2) ✓' : ' · ⚠ cellToScreen / screenToCell не обратимы') : '') +
+    '<br>Палитра — из фактических цветов пикселей. Символы сетки: «.» — пусто, 0-9 → палитра[0..9], a-z → палитра[10..35].');
+
+  const ta = _aiTextArea(true);
+  ta.value = json;
+  box.appendChild(ta);
+  const status = _aiStatusLine();
+  box.appendChild(status);
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:10px;margin-top:14px;';
+  row.appendChild(_aiButton('⬇ Скачать .json', true, () => {
+    _aiDownloadJSON(json, fileName);
+    status.style.color = '#6af7c4';
+    status.textContent = '✓ Сохранено: ' + fileName;
+  }));
+  row.appendChild(_aiButton('📋 Копировать', false, async () => {
+    const ok = await _aiCopyText(json, ta);
+    status.style.color = ok ? '#6af7c4' : '#f76a8a';
+    status.textContent = ok ? '✓ JSON скопирован — вставь его в чат с агентом.'
+                            : '⚠ Не удалось скопировать автоматически — текст выделен, нажми Ctrl/Cmd+C.';
+  }));
+  row.appendChild(_aiButton('Закрыть', false, () => { document.getElementById('aiDialog').remove(); }));
+  box.appendChild(row);
+  setTimeout(() => { ta.focus(); ta.setSelectionRange(0, json.length); }, 50);
+}
+
+// ─── 9. ИМПОРТ ────────────────────────────────────────────────────────────────
+function _aiImportText(text) {
+  const ui = _aiImportUI;
+  const parsed = _aiValidateJSON(text);
+  if (!parsed.ok) {
+    if (ui) { ui.status('✗ ' + parsed.error, true); return; }
+    alert('Импорт от ИИ не удался:\n\n' + parsed.error);
+    return;
+  }
+  const pixelCount = parsed.layers.reduce((n, ld) => n + ld.pixels.size, 0);
+  const question = 'Импортировать ' + parsed.layers.length + ' слоёв (' + parsed.palette.length +
+    ' цветов, ' + pixelCount + ' пикселей)?\n\nПиксельные слои и палитра будут заменены. Ctrl+Z отменяет.';
+  if (!(ui ? ui.confirm(question) : confirm(question))) return;
+  let result;
+  try {
+    result = _aiApplyDocument(parsed);
+  } catch (err) {
+    const msg = (err && err.message) ? err.message : String(err);
+    if (ui) { ui.status('✗ Импорт не применён: ' + msg, true); return; }
+    alert('Импорт от ИИ не удался:\n\n' + msg);
+    return;
+  }
+  const notes = parsed.notes.length ? ('\n\n' + parsed.notes.join('\n')) : '';
+  if (ui) {
+    ui.status('✓ Импортировано: ' + result.layers + ' слоёв, ' + result.colors + ' цветов, ' +
+              result.pixels + ' пикселей. Ctrl+Z — отменить.' + notes, false);
+  } else {
+    _aiToast('Импортировано: ' + result.layers + ' слоёв, ' + result.pixels + ' пикселей', false);
+    if (parsed.notes.length) alert('Импорт прошёл с замечаниями:\n\n' + parsed.notes.join('\n'));
+  }
+}
+function _aiPickFile() {
+  let inp = document.getElementById('aiJsonFileInput');
+  if (!inp) {
+    inp = document.createElement('input');
+    inp.type = 'file';
+    inp.id = 'aiJsonFileInput';
+    inp.accept = '.json,application/json';
+    inp.style.display = 'none';
+    inp.addEventListener('change', () => {
+      const f = inp.files && inp.files[0];
+      inp.value = '';
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = e => _aiImportText(String(e.target.result || ''));
+      reader.onerror = () => {
+        const msg = 'Не удалось прочитать файл.';
+        if (_aiImportUI) _aiImportUI.status('✗ ' + msg, true); else alert(msg);
+      };
+      reader.readAsText(f);
+    });
+    document.body.appendChild(inp);
+  }
+  inp.value = '';
+  inp.click();
+}
+function importFromAI() {
+  _sfx.click();
+  const { box } = _aiModal('🤖 Импорт от ИИ',
+    'Вставь сюда JSON, который вернул агент (или <b>📂 Из файла</b>). Символы сетки: «.» — пусто, ' +
+    '0-9 → палитра[0..9], a-z → палитра[10..35]. Пиксельные слои и палитра заменяются целиком — ' +
+    '<b>Ctrl+Z</b> отменяет импорт.',
+    () => { _aiImportUI = null; });
+
+  const ta = _aiTextArea(false);
+  ta.placeholder = '{"meta":{…},"palette":["#1a1a2e","#e94560"],"layers":[{"name":"тело","folder":null,' +
+                   '"bbox":{"minCol":0,"minRow":0,"maxCol":7,"maxRow":1},"rows":["..0000.."]}]}';
+  box.appendChild(ta);
+  const status = _aiStatusLine();
+  box.appendChild(status);
+  _aiImportUI = {
+    status: (msg, isError) => { status.style.color = isError ? '#f76a8a' : '#6af7c4'; status.textContent = msg; },
+    confirm: confirm,
+  };
+
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:10px;margin-top:14px;';
+  row.appendChild(_aiButton('⬆ Импортировать', true, () => _aiImportText(ta.value)));
+  row.appendChild(_aiButton('📂 Из файла', false, () => _aiPickFile()));
+  row.appendChild(_aiButton('Отмена', false, () => { _aiImportUI = null; document.getElementById('aiDialog').remove(); }));
+  box.appendChild(row);
+  setTimeout(() => ta.focus(), 50);
+}
+
+// Подписи кнопок продублированы в разметке — на случай ручной правки index.html.
+(function _aiButtonTitles() {
+  const ex = document.getElementById('exportAIBtn');
+  if (ex) { ex.title = 'Экспорт для ИИ'; ex.setAttribute('aria-label', 'Экспорт для ИИ'); }
+  const im = document.getElementById('importAIBtn');
+  if (im) { im.title = 'Импорт от ИИ'; im.setAttribute('aria-label', 'Импорт от ИИ'); }
+})();
 </script>
 </body>
 </html>
