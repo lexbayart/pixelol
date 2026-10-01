@@ -15632,6 +15632,87 @@ function _aiBuildExportJSON() {
   return JSON.stringify(doc);
 }
 
+// ─── 4б. ДВЕ ФОРМЫ ВЫВОДА: ФАЙЛ (С ОТСТУПАМИ) vs БУФЕР ОБМЕНА (В ОДНУ СТРОКУ) ───
+// Один и тот же документ уходит в два РАЗНЫХ места, поэтому у него две формы:
+//   • файл на диске — с отступами (2 пробела) и переводом строки в конце.
+//     Ровно так же пишет ai-server/server.js (writeCanvasFile), поэтому файл,
+//     который скачал человек, и файл, который переписал агент, читаются одинаково;
+//   • буфер обмена  — в одну строку: так меньше шума в чате, и это ровно то, что
+//     возвращает _aiBuildExportJSON (его контракт не меняется).
+// Отступы — это только пробелы: обе формы парсятся в один и тот же объект.
+const AI_JSON_INDENT = 2;
+function _aiPrettyJSON(compact) {
+  const text = String(compact == null ? '' : compact);
+  try {
+    return JSON.stringify(JSON.parse(text), null, AI_JSON_INDENT) + '\n';
+  } catch (err) {
+    return text; // с JSON.stringify это невозможно, но лучше вернуть исходник, чем пустоту
+  }
+}
+
+// ─── 4в. ЧИСЛА ДЛЯ СТРОЧКИ «ЧТО ПОЛУЧИЛОСЬ» (для человека, не для разработчика) ─
+// Размер считаем в БАЙТАХ, а не в символах: русское название слоя — два байта на букву.
+function _aiByteLength(text) {
+  const s = String(text == null ? '' : text);
+  try {
+    if (typeof TextEncoder === 'function') return new TextEncoder().encode(s).length;
+  } catch (err) { /* старый браузер без TextEncoder — считаем ниже */ }
+  try {
+    return encodeURIComponent(s).replace(/%[0-9A-F]{2}|./g, 'x').length;
+  } catch (err) {
+    return s.length;
+  }
+}
+function _aiHumanBytes(n) {
+  const v = (Number.isFinite(n) && n > 0) ? Math.round(n) : 0;
+  if (v < 1024) return v + ' Б';
+  if (v < 1024 * 1024) return String(Math.round(v / 102.4) / 10) + ' КБ';       // КБ с одним знаком
+  return String(Math.round(v / 104857.6) / 10) + ' МБ';
+}
+// Русские склонения: 1 слой / 2 слоя / 5 слоёв.
+function _aiPlural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b > 1 && b < 5) return few;
+  if (b === 1) return one;
+  return many;
+}
+// Размер всего рисунка в клетках — объединение bbox всех непустых слоёв.
+function _aiDocBounds(layers) {
+  let minCol = Infinity, minRow = Infinity, maxCol = -Infinity, maxRow = -Infinity, seen = false;
+  for (const ld of (Array.isArray(layers) ? layers : [])) {
+    const bb = ld && ld.bbox;
+    if (!bb || typeof bb !== 'object' || Array.isArray(bb)) continue;
+    const a = Number(bb.minCol), b = Number(bb.minRow), c = Number(bb.maxCol), d = Number(bb.maxRow);
+    if (!Number.isFinite(a) || !Number.isFinite(b) || !Number.isFinite(c) || !Number.isFinite(d)) continue;
+    if (c < a || d < b) continue;
+    seen = true;
+    if (a < minCol) minCol = a;
+    if (b < minRow) minRow = b;
+    if (c > maxCol) maxCol = c;
+    if (d > maxRow) maxRow = d;
+  }
+  if (!seen) return null;
+  return {
+    minCol: minCol, minRow: minRow, maxCol: maxCol, maxRow: maxRow,
+    w: maxCol - minCol + 1, h: maxRow - minRow + 1,
+  };
+}
+// Одна спокойная строка: сколько слоёв · сколько цветов · сколько клеток · вес файла.
+// fileText — то, что реально уйдёт в файл (с отступами).
+function _aiDocStatsLine(doc, fileText) {
+  const d = (doc && typeof doc === 'object') ? doc : {};
+  const layers  = Array.isArray(d.layers) ? d.layers : [];
+  const palette = Array.isArray(d.palette) ? d.palette : [];
+  const bounds = _aiDocBounds(layers);
+  const area = bounds ? bounds.w * bounds.h : 0;
+  return layers.length + ' ' + _aiPlural(layers.length, 'слой', 'слоя', 'слоёв') +
+         ' · ' + palette.length + ' ' + _aiPlural(palette.length, 'цвет', 'цвета', 'цветов') +
+         ' · ' + (bounds ? bounds.w + '×' + bounds.h : '0×0') + ' ' +
+             _aiPlural(area, 'клетка', 'клетки', 'клеток') +
+         ' · ' + _aiHumanBytes(_aiByteLength(fileText));
+}
+
 // ─── 5. ВАЛИДАЦИЯ (IMPORT) ────────────────────────────────────────────────────
 // Возвращает { ok:false, error } либо { ok:true, palette, layers, notes }.
 // doc.layers[i] = { name, folder, pixels: Map<"col,row", hex> } — уже готово к применению.
@@ -15862,32 +15943,68 @@ function _aiModal(title, hint, onClose) {
   overlay.id = 'aiDialog';
   overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:200;backdrop-filter:blur(6px);font-family:JetBrains Mono,monospace;';
   const box = document.createElement('div');
-  box.style.cssText = 'background:#16161e;border:1px solid #2e2e42;border-radius:14px;padding:24px 28px;width:min(760px,92vw);max-height:88vh;overflow:auto;color:#e8e8f0;';
+  box.style.cssText = 'position:relative;background:#16161e;border:1px solid #2e2e42;border-radius:14px;padding:24px 28px;width:min(760px,92vw);max-height:88vh;overflow:auto;color:#e8e8f0;outline:none;';
   box.innerHTML = '<div style="font-size:18px;margin-bottom:8px;">' + _aiEscapeHtml(title) + '</div>' +
                   '<div style="font-size:12px;color:#888899;margin-bottom:14px;line-height:1.6;">' + hint + '</div>';
+  // Единственный способ закрыть диалог: и ✕, и клик по фону, и Escape — всё зовёт close().
+  const close = () => {
+    if (onClose) onClose();
+    overlay.remove();
+  };
+  overlay.__aiClose = close; // к нему обращается обработчик Escape ниже
+  const x = document.createElement('button');
+  x.type = 'button';
+  x.textContent = '✕';
+  x.title = 'Закрыть';
+  x.setAttribute('aria-label', 'Закрыть');
+  x.style.cssText = 'position:absolute;top:10px;right:10px;width:32px;height:32px;background:#1e1e2a;color:#e8e8f0;' +
+    'border:1px solid #2e2e42;border-radius:8px;padding:0;font-family:JetBrains Mono,monospace;font-size:15px;' +
+    'line-height:1;cursor:pointer;';
+  x.addEventListener('click', close);
+  box.appendChild(x);
+  box.tabIndex = -1; // фокус на самом окне: работают Tab, Escape и экранные читалки
   overlay.appendChild(box);
   document.body.appendChild(overlay);
   overlay.addEventListener('click', e => {
     if (e.target !== overlay) return;
-    if (onClose) onClose();
-    overlay.remove();
+    close();
   });
-  return { overlay: overlay, box: box };
+  return { overlay: overlay, box: box, close: close };
 }
+// Escape закрывает открытый диалог AI. Слушатель висит на window в ФАЗЕ ЗАХВАТА и
+// останавливает распространение: без этого горячие клавиши холста (обработчик ниже
+// по файлу) всё равно получили бы Escape и начали отменять выделение слоёв ПОД
+// открытым окном. Когда #aiDialog не существует, обработчик не делает ничего и
+// ничего не блокирует — обычные Escape приложения работают как раньше.
+window.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' && e.key !== 'Esc') return;
+  const dialog = document.getElementById('aiDialog');
+  if (!dialog) return;
+  e.preventDefault();
+  e.stopPropagation();
+  if (dialog.__aiClose) dialog.__aiClose();
+}, true);
 function _aiTextArea(readonly) {
   const ta = document.createElement('textarea');
   ta.spellcheck = false;
-  ta.wrap = 'off';
+  ta.wrap = 'soft';
   ta.readOnly = !!readonly;
   ta.style.cssText = 'width:100%;height:200px;background:#0e0e12;border:1px solid #2e2e42;border-radius:7px;' +
-    'color:#e8e8f0;padding:10px;font-family:JetBrains Mono,monospace;font-size:12px;line-height:1.45;resize:vertical;';
+    'color:#e8e8f0;padding:10px;font-family:JetBrains Mono,monospace;font-size:12px;line-height:1.45;resize:vertical;' +
+    'white-space:pre-wrap;overflow-wrap:break-word;';
   return ta;
 }
-function _aiButton(label, primary, onClick) {
+// size === 'lg' — крупная кнопка под главное действие (две равные, на всю ширину).
+function _aiButton(label, primary, onClick, size) {
   const b = document.createElement('button');
+  b.type = 'button';
   b.textContent = label;
-  b.style.cssText = 'flex:1;background:' + (primary ? '#6af7c4' : '#1e1e2a') + ';color:' + (primary ? '#0e0e12' : '#e8e8f0') +
-    ';border:1px solid #2e2e42;border-radius:8px;padding:11px;font-family:JetBrains Mono,monospace;font-size:13px;' +
+  const big = size === 'lg';
+  b.style.cssText = 'flex:1;' + (big ? 'min-height:64px;' : '') +
+    'background:' + (primary ? '#6af7c4' : '#1e1e2a') + ';color:' + (primary ? '#0e0e12' : '#e8e8f0') +
+    ';border:1px solid ' + (primary ? '#6af7c4' : '#2e2e42') + ';border-radius:8px;' +
+    'padding:' + (big ? '16px 14px' : '11px') +
+    ';font-family:JetBrains Mono,monospace;font-size:' + (big ? '16px' : '13px') + ';line-height:1.3;' +
     (primary ? 'font-weight:700;' : '') + 'cursor:pointer;';
   b.addEventListener('click', onClick);
   return b;
@@ -15908,65 +16025,111 @@ function _aiDownloadJSON(json, fileName) {
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
 }
 // navigator.clipboard, фолбэк — execCommand на том же textarea. Без библиотек.
-async function _aiCopyText(text, ta) {
+// reveal() показывает скрытое поле с кодом (execCommand не работает по невидимому
+// элементу) и возвращает функцию, которая снова его прячет. Если копирование не
+// удалось, поле остаётся видимым и выделенным — Ctrl/Cmd+C вручную.
+async function _aiCopyText(text, ta, reveal) {
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       await navigator.clipboard.writeText(text);
       return true;
     }
   } catch (err) { /* не сработало — пробуем фолбэк */ }
+  const restore = (typeof reveal === 'function') ? reveal() : null;
+  const previous = ta.value;
   try {
+    ta.value = text;            // ровно то, что человек получит
     ta.focus();
     ta.setSelectionRange(0, text.length);
-    return !!document.execCommand('copy');
-  } catch (err) {
-    return false;
-  }
+    if (document.execCommand('copy')) {
+      ta.value = previous;
+      ta.setSelectionRange(0, 0);
+      if (restore) restore();
+      return true;
+    }
+  } catch (err) { /* execCommand недоступен — оставляем текст выделенным */ }
+  return false;
 }
 
 // ─── 8. ЭКСПОРТ ───────────────────────────────────────────────────────────────
+// Что человек видит: две крупные равные кнопки (скачать файл / скопировать) и
+// тихая ссылка «Показать код». Сам код по умолчанию СПРЯТАН — человек пришёл за
+// файлом, а не за строкой JSON во весь экран.
 function exportForAI() {
   _sfx.click();
-  let json;
+  let compact;
   try {
-    json = _aiBuildExportJSON();
+    compact = _aiBuildExportJSON();
   } catch (err) {
     _aiToast('Экспорт для ИИ не удался: ' + (err && err.message ? err.message : err), true);
     return;
   }
-  let geometry = '';
-  try { geometry = JSON.parse(json).meta.geometry; } catch (err) { geometry = ''; }
-  const probe = _aiProbeGeometry();
+  // Две формы одного документа: в файл — с отступами, в чат — в одну строку.
+  const pretty = _aiPrettyJSON(compact);
+  let doc = null;
+  try { doc = JSON.parse(compact); } catch (err) { doc = null; }
   const fileName = (_lastLolName || 'pixelol').replace(/[\\/:*?"<>|]/g, '_') + '.ai.json';
 
   const { box } = _aiModal('🤖 Экспорт для ИИ',
-    'JSON-схема обмена с ИИ-агентом (ТЗ §5): <b>⬇ Скачать</b> или <b>📋 Копировать</b> → вставить в чат ' +
-    'с агентом → получить изменённый JSON → <b>⬆ Импорт от ИИ</b>.<br>' +
-    'Геометрия собрана из кода холста: <code>' + _aiEscapeHtml(geometry) + '</code>' +
-    (probe ? (probe.invertible ? ' · screenToCell(cellToScreen(3,−2)) = (3,−2) ✓' : ' · ⚠ cellToScreen / screenToCell не обратимы') : '') +
-    '<br>Палитра — из фактических цветов пикселей. Символы сетки: «.» — пусто, 0-9 → палитра[0..9], a-z → палитра[10..35].');
+    'Рисунок превратился в текст, который понимает ИИ-агент. Сам рисунок не изменился.<br>' +
+    'Дальше: <b>📋 Копировать</b> → вставьте текст в чат с агентом и попросите изменить рисунок → ' +
+    'скопируйте ответ обратно → нажмите <b>⬆ Импорт от ИИ</b>.');
 
-  const ta = _aiTextArea(true);
-  ta.value = json;
-  box.appendChild(ta);
+  const stats = document.createElement('div');
+  stats.style.cssText = 'font-size:12px;color:#6af7c4;margin-bottom:18px;';
+  stats.textContent = doc ? _aiDocStatsLine(doc, pretty) : '';
+  box.appendChild(stats);
+
   const status = _aiStatusLine();
-  box.appendChild(status);
+  status.style.marginTop = '16px';
+
+  // ── код по запросу ──
+  const codeView = document.createElement('div');
+  codeView.style.cssText = 'display:none;margin-top:14px;';
+  const ta = _aiTextArea(true);
+  ta.style.height = '190px';
+  ta.value = pretty;             // ровно то, что уходит в файл
+  codeView.appendChild(ta);
+  const reveal = () => {
+    if (codeView.style.display === 'none') codeView.style.display = 'block';
+    return () => { codeView.style.display = 'none'; };
+  };
+
+  // ── две равные крупные кнопки ──
   const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:10px;margin-top:14px;';
-  row.appendChild(_aiButton('⬇ Скачать .json', true, () => {
-    _aiDownloadJSON(json, fileName);
+  row.style.cssText = 'display:flex;gap:10px;margin-top:16px;';
+  row.appendChild(_aiButton('⬇ Скачать файл', true, () => {
+    _aiDownloadJSON(pretty, fileName);
     status.style.color = '#6af7c4';
-    status.textContent = '✓ Сохранено: ' + fileName;
-  }));
+    status.textContent = '✓ Файл сохранён: ' + fileName;
+  }, 'lg'));
   row.appendChild(_aiButton('📋 Копировать', false, async () => {
-    const ok = await _aiCopyText(json, ta);
+    const ok = await _aiCopyText(compact, ta, reveal);
     status.style.color = ok ? '#6af7c4' : '#f76a8a';
-    status.textContent = ok ? '✓ JSON скопирован — вставь его в чат с агентом.'
-                            : '⚠ Не удалось скопировать автоматически — текст выделен, нажми Ctrl/Cmd+C.';
-  }));
-  row.appendChild(_aiButton('Закрыть', false, () => { document.getElementById('aiDialog').remove(); }));
+    status.textContent = ok ? '✓ Скопировано одной строкой — так короче для чата.'
+                            : '⚠ Само не получилось — текст выделен, нажмите Ctrl/Cmd+C.';
+  }, 'lg'));
   box.appendChild(row);
-  setTimeout(() => { ta.focus(); ta.setSelectionRange(0, json.length); }, 50);
+
+  // ── тихая ссылка под кнопками ──
+  const linkRow = document.createElement('div');
+  linkRow.style.cssText = 'margin-top:14px;text-align:center;';
+  const link = document.createElement('button');
+  link.type = 'button';
+  link.textContent = 'Показать код';
+  link.style.cssText = 'background:none;border:0;padding:2px 6px;color:#888899;text-decoration:underline;' +
+    'font-family:JetBrains Mono,monospace;font-size:12px;cursor:pointer;';
+  link.addEventListener('click', () => {
+    const open = (codeView.style.display === 'none');
+    codeView.style.display = open ? 'block' : 'none';
+    link.textContent = open ? 'Скрыть код' : 'Показать код';
+  });
+  linkRow.appendChild(link);
+  box.appendChild(linkRow);
+
+  box.appendChild(codeView);
+  box.appendChild(status);
+  box.focus(); // фокус на окне, а не на тексте: код не выделяется сам собой
 }
 
 // ─── 9. ИМПОРТ ────────────────────────────────────────────────────────────────
@@ -16027,10 +16190,9 @@ function _aiPickFile() {
 }
 function importFromAI() {
   _sfx.click();
-  const { box } = _aiModal('🤖 Импорт от ИИ',
-    'Вставь сюда JSON, который вернул агент (или <b>📂 Из файла</b>). Символы сетки: «.» — пусто, ' +
-    '0-9 → палитра[0..9], a-z → палитра[10..35]. Пиксельные слои и палитра заменяются целиком — ' +
-    '<b>Ctrl+Z</b> отменяет импорт.',
+  const { box, close } = _aiModal('🤖 Импорт от ИИ',
+    'Вставьте сюда то, что вернул агент, — или нажмите <b>📂 Из файла</b> и выберите файл.<br>' +
+    'Рисунок будет заменён целиком. Если что-то пойдёт не так — <b>Ctrl+Z</b> отменяет импорт.',
     () => { _aiImportUI = null; });
 
   const ta = _aiTextArea(false);
@@ -16048,7 +16210,7 @@ function importFromAI() {
   row.style.cssText = 'display:flex;gap:10px;margin-top:14px;';
   row.appendChild(_aiButton('⬆ Импортировать', true, () => _aiImportText(ta.value)));
   row.appendChild(_aiButton('📂 Из файла', false, () => _aiPickFile()));
-  row.appendChild(_aiButton('Отмена', false, () => { _aiImportUI = null; document.getElementById('aiDialog').remove(); }));
+  row.appendChild(_aiButton('Отмена', false, () => close()));   // ✕, клик по фону и Escape — туда же
   box.appendChild(row);
   setTimeout(() => ta.focus(), 50);
 }

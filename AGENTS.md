@@ -91,8 +91,12 @@ JSON back → **⬆ «Импорт от ИИ»**. Works today, with no infrastru
 ## Level 1 — the MCP server
 
 `ai-server/server.js` is a real MCP server (JSON-RPC 2.0 over stdio, no dependencies). It
-edits one AI-JSON file on disk — the file «Экспорт для ИИ» → **«⬇ Скачать .json»** produces
+edits one AI-JSON file on disk — the file «Экспорт для ИИ» → **«⬇ Скачать файл»** produces
 (`<project-name>.ai.json`). See `ai-server/README.md` for client setup.
+
+**Two forms, two destinations.** The downloaded file is pretty-printed (2-space indent,
+trailing newline) so a human can read it; the **📋 Копировать** string is compact (one
+line) so a chat stays clean. Both parse to the identical document.
 
 | Tool | Input | Output |
 |---|---|---|
