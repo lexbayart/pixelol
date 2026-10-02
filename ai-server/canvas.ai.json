@@ -1,50 +1,61 @@
 {
   "meta": {
-    "project": "hero_prototype",
+    "project": "pixelol_project",
     "geometry": "45deg-rotated-square, symmetric 1:1; wx=(col-row)*step; wy=(col+row)*step",
     "note": "col/row — логические координаты сетки; холст без границ, хранится только bbox каждого слоя"
   },
   "palette": [
-    "#1a1a2e",
     "#e94560",
+    "#3fa34d",
     "#f5d0a9",
+    "#4a90d9",
     "#3a2a1e"
   ],
   "layers": [
     {
-      "name": "глаза",
-      "folder": "персонаж_1",
-      "bbox": {
-        "minCol": 1,
-        "minRow": 2,
-        "maxCol": 2,
-        "maxRow": 2
-      },
-      "rows": [
-        "21"
-      ]
+      "name": "дом",
+      "folder": null,
+      "bbox": null,
+      "rows": []
     },
     {
-      "name": "тело",
-      "folder": "персонаж_1",
+      "name": "проба",
+      "folder": null,
+      "bbox": null,
+      "rows": []
+    },
+    {
+      "name": "дом",
+      "folder": null,
+      "bbox": null,
+      "rows": []
+    },
+    {
+      "name": "проба",
+      "folder": null,
       "bbox": {
-        "minCol": 0,
-        "minRow": 0,
-        "maxCol": 4,
+        "minCol": 3,
+        "minRow": -5,
+        "maxCol": 12,
         "maxRow": 6
       },
       "rows": [
-        "11111",
-        "12221",
-        "12221",
-        "12221",
-        "11111",
-        ".111.",
-        ".111."
+        "..0.......",
+        "..00......",
+        "111111....",
+        "111111....",
+        "1111122...",
+        "11112332.1",
+        "111234321.",
+        "11243341..",
+        "..23421...",
+        "...221....",
+        "....1.....",
+        "...1......"
       ]
     },
     {
-      "name": "заметки",
+      "name": "Слой 1",
       "folder": null,
       "bbox": null,
       "rows": []
